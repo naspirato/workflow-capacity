@@ -1,0 +1,63 @@
+# Cloud folder quotas (Compute Cloud).
+quotas:
+  instances: 110
+  vcpu: 5400
+  ram_gb: 23000
+  nrd_ssd_gb: 200000
+
+# Legacy aggregate reserve (used if static_runners do not cover everything).
+reserved:
+  vcpu: 200
+  ram_gb: 600
+  instances: 22
+  nrd_ssd_gb: 16000
+
+# Always-on VMs outside auto-provisioned runner pool.
+# Add new runner types here (tiny workers, analytics caches, etc.).
+static_runners:
+  tiny-worker:
+    count: 4
+    footprint:
+      vcpu: 4
+      ram_gb: 16
+      nrd_ssd_gb: 200
+  analytics-cache:
+    count: 2
+    footprint:
+      vcpu: 32
+      ram_gb: 128
+      nrd_ssd_gb: 2000
+
+headroom_fraction: 0.9
+saturated_min_shards: 2
+
+footprints:
+  build-preset-relwithdebinfo:
+    vcpu: 64
+    ram_gb: 256
+    nrd_ssd_gb: 2417
+  build-preset-release:
+    vcpu: 64
+    ram_gb: 256
+    nrd_ssd_gb: 2417
+  build-preset-release-asan:
+    vcpu: 96
+    ram_gb: 288
+    nrd_ssd_gb: 2417
+  build-preset-release-msan:
+    vcpu: 64
+    ram_gb: 320
+    nrd_ssd_gb: 2417
+  build-preset-release-tsan:
+    vcpu: 64
+    ram_gb: 320
+    nrd_ssd_gb: 2417
+  build-preset-analytic-node:
+    vcpu: 64
+    ram_gb: 320
+    nrd_ssd_gb: 2417
+
+default_footprint:
+  vcpu: 96
+  ram_gb: 320
+  nrd_ssd_gb: 2417

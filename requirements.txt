@@ -1,0 +1,5 @@
+PyYAML>=6.0
+pandas>=2.0
+plotly>=5.18
+jupyter>=1.0
+ipywidgets>=8.0

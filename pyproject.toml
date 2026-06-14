@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "workflow-capacity"
+version = "0.1.0"
+description = "Self-hosted runner pool capacity simulator (monolith vs PR-check sharding)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "PyYAML>=6.0",
+    "pandas>=2.0",
+    "plotly>=5.18",
+    "jupyter>=1.0",
+    "ipywidgets>=8.0",
+]
+
+[project.scripts]
+workflow-capacity-collect = "workflow_capacity.collect:main"
+workflow-capacity-augment = "workflow_capacity.augment:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["workflow_capacity*"]
