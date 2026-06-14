@@ -109,6 +109,85 @@ def metrics_from_events(
     return out
 
 
+def _branch_metrics_sec(
+    events: list[AllocEvent],
+    pr_runs: list[PrCheckRun],
+) -> tuple[dict[int, dict[str, float]], dict[int, dict[str, float]]]:
+    """Per PR run: relwithdebinfo and release-asan wait/work (sec)."""
+    rwdi_job_to_run = {str(r.rwdi_job["job_id"]): r.run_id for r in pr_runs}
+    asan_job_to_run = {
+        str(r.asan_job["job_id"]): r.run_id for r in pr_runs if r.asan_job
+    }
+    rwdi: dict[int, dict[str, float]] = defaultdict(lambda: {"wait": 0.0, "work": 0.0})
+    asan: dict[int, dict[str, float]] = defaultdict(lambda: {"wait": 0.0, "work": 0.0})
+
+    for e in events:
+        rid = run_id_from_event(e)
+        if rid is not None:
+            rwdi[rid]["wait"] += e.wait_sec
+            rwdi[rid]["work"] += e.work_sec
+            continue
+        if not e.key.isdigit():
+            continue
+        if e.key in rwdi_job_to_run:
+            rid = rwdi_job_to_run[e.key]
+            rwdi[rid]["wait"] += e.wait_sec
+            rwdi[rid]["work"] += e.work_sec
+        elif e.key in asan_job_to_run:
+            rid = asan_job_to_run[e.key]
+            asan[rid]["wait"] += e.wait_sec
+            asan[rid]["work"] += e.work_sec
+
+    return rwdi, asan
+
+
+def pr_wall_metrics_from_events(
+    events: list[AllocEvent],
+    pr_runs: list[PrCheckRun],
+) -> list[RunMetrics]:
+    """PR-check wall = max(relwithdebinfo, release-asan) — jobs start in parallel."""
+    rwdi, asan = _branch_metrics_sec(events, pr_runs)
+    out: list[RunMetrics] = []
+    for run in pr_runs:
+        started = parse_ts(run.rwdi_job["started_at"])
+        if started.weekday() >= 5:
+            continue
+        _, est_d = estimate_shard_count(
+            float(run.rwdi_job["duration_sec"]),
+            started_at=started,
+            capacity_cap=12,
+        )
+        r = rwdi.get(run.run_id, {"wait": 0.0, "work": 0.0})
+        a = asan.get(run.run_id, {"wait": 0.0, "work": 0.0})
+        rw_total = r["wait"] + r["work"]
+        aw_total = a["wait"] + a["work"]
+        if aw_total >= rw_total and run.asan_job:
+            wait_min = a["wait"] / 60.0
+            work_min = a["work"] / 60.0
+        else:
+            wait_min = r["wait"] / 60.0
+            work_min = r["work"] / 60.0
+        total_min = max(rw_total, aw_total) / 60.0
+        if total_min <= 0:
+            continue
+        if aw_total >= rw_total and run.asan_job:
+            wait_min = a["wait"] / 60.0
+            work_min = a["work"] / 60.0
+        else:
+            wait_min = r["wait"] / 60.0
+            work_min = r["work"] / 60.0
+        out.append(
+            RunMetrics(
+                run_id=run.run_id,
+                hour_utc=started.astimezone(timezone.utc).hour,
+                d_key=d_group(est_d),
+                wait_min=wait_min,
+                work_min=work_min,
+            )
+        )
+    return out
+
+
 def aggregate_p90(rows: list[RunMetrics]) -> dict[tuple[int | None, str], dict[str, Any]]:
     cells: dict[tuple[int | None, str], list[RunMetrics]] = defaultdict(list)
     for r in rows:
@@ -140,6 +219,7 @@ def scenario_metrics(
     pr_runs: list[PrCheckRun],
     *,
     shard_eligible: Callable[[PrCheckRun], bool] | None = None,
+    pr_wall: bool = False,
 ) -> tuple[list[RunMetrics], list[RunMetrics]]:
     job_id_to_run = {str(r.rwdi_job["job_id"]): r.run_id for r in pr_runs}
     if shard_eligible is not None:
@@ -147,8 +227,12 @@ def scenario_metrics(
         pr_subset = [r for r in pr_runs if r.run_id in eligible or r.mode != "sharded"]
     else:
         pr_subset = pr_runs
-    base_rows = metrics_from_events(baseline.alloc_events, pr_subset, job_id_to_run)
-    par_rows = metrics_from_events(parallel.alloc_events, pr_subset, job_id_to_run)
+    if pr_wall:
+        base_rows = pr_wall_metrics_from_events(baseline.alloc_events, pr_subset)
+        par_rows = pr_wall_metrics_from_events(parallel.alloc_events, pr_subset)
+    else:
+        base_rows = metrics_from_events(baseline.alloc_events, pr_subset, job_id_to_run)
+        par_rows = metrics_from_events(parallel.alloc_events, pr_subset, job_id_to_run)
     return base_rows, par_rows
 
 

@@ -38,10 +38,11 @@ WORKFLOW_NAMES = (
 )
 
 MEANINGFUL_CONCLUSIONS = {"success", "failure", "timed_out"}
-MAX_WORKERS = 12
+MAX_WORKERS = 6
 
 
-def gh_api(path: str, *, retries: int = 5) -> Any:
+def gh_api(path: str, *, retries: int = 8) -> Any:
+    last_err = ""
     for attempt in range(retries):
         try:
             out = subprocess.check_output(
@@ -50,11 +51,12 @@ def gh_api(path: str, *, retries: int = 5) -> Any:
                 text=True,
             )
             return json.loads(out)
-        except subprocess.CalledProcessError:
+        except subprocess.CalledProcessError as exc:
+            last_err = (exc.output or str(exc)).strip()
             if attempt + 1 == retries:
-                raise
-            time.sleep(2 ** attempt)
-    raise RuntimeError("unreachable")
+                raise RuntimeError(f"gh api failed for {path}: {last_err}") from exc
+            time.sleep(min(30, 2 ** attempt))
+    raise RuntimeError(f"gh api failed for {path}: {last_err}")
 
 
 def load_workflow_ids(repo: str) -> dict[str, int]:
@@ -261,10 +263,22 @@ def main() -> int:
     parser.add_argument("--repo", default=DEFAULT_REPO)
     parser.add_argument("--days", type=int, default=14)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--workflows",
+        default="",
+        help="Comma-separated workflow names (default: all known workflows)",
+    )
     args = parser.parse_args()
     until = datetime.now(timezone.utc)
     since = until - timedelta(days=args.days)
-    collect_window(repo=args.repo, since=since, until=until, output=args.output)
+    workflows = [w.strip() for w in args.workflows.split(",") if w.strip()] or None
+    collect_window(
+        repo=args.repo,
+        since=since,
+        until=until,
+        output=args.output,
+        workflows=workflows,
+    )
     return 0
 
 
