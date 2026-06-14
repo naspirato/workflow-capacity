@@ -39,10 +39,11 @@ def evaluate_config(
     rollout_label: str = "all eligible",
     shard_eligible: Callable[[PrCheckRun], bool] | None = None,
     peak_hours: list[int] | None = None,
+    pr_wall: bool = False,
 ) -> ConfigComparison:
     baseline, parallel = run_pair(jobs, pr_runs, config, shard_eligible=shard_eligible)
     base_rows, par_rows = scenario_metrics(
-        baseline, parallel, pr_runs, shard_eligible=shard_eligible
+        baseline, parallel, pr_runs, shard_eligible=shard_eligible, pr_wall=pr_wall
     )
     base_agg = aggregate_p90(base_rows)
     par_agg = aggregate_p90(par_rows)
