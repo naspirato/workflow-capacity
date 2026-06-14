@@ -271,7 +271,66 @@
       table { font-size: 0.82rem; }
       th, td { padding: 0.5rem 0.35rem; }
     }
+
+    .sim-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      margin-bottom: 1rem;
+    }
+
+    .config-tabs {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      margin: 1rem 0;
+    }
+
+    .config-tab {
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: 8px;
+      padding: 0.45rem 0.85rem;
+      cursor: pointer;
+      font-size: 0.9rem;
+    }
+
+    .config-tab.active {
+      border-color: var(--accent);
+      background: rgba(79, 140, 255, 0.15);
+    }
+
+    .chart-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+      gap: 1rem;
+      margin: 1rem 0;
+    }
+
+    .chart-box {
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 0.75rem;
+      min-height: 280px;
+    }
+
+    .chart-box h3 {
+      margin: 0 0 0.5rem;
+      font-size: 0.95rem;
+      color: var(--muted);
+    }
+
+    .verdict {
+      font-size: 1.1rem;
+      font-weight: 600;
+      margin: 0.5rem 0 1rem;
+    }
+
+    .hidden { display: none; }
   </style>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 </head>
 <body>
   <div class="wrap">
@@ -288,6 +347,68 @@
         <span class="pill">peak 09:00–16:59 UTC → cap 4 shard</span>
       </div>
     </header>
+
+    <section id="simulation-data">
+      <h2>Симуляция на реальной истории (7 дней)</h2>
+      <p class="section-desc" id="sim-desc">Загрузка предрасчитанных p90 wait / work / total…</p>
+      <div id="sim-loading" class="note">Загружаем <code>simulation_results.json</code>…</div>
+      <div id="sim-content" class="hidden">
+        <div class="sim-meta" id="sim-meta"></div>
+        <div class="config-tabs" id="config-tabs"></div>
+        <p class="verdict" id="sim-verdict"></p>
+        <div class="chart-grid">
+          <div class="chart-box"><h3>Total p90: монолит vs sharding</h3><canvas id="chart-total"></canvas></div>
+          <div class="chart-box"><h3>Wait / Work p90 (выбранный конфиг)</h3><canvas id="chart-wait-work"></canvas></div>
+        </div>
+        <h3>По группам D (p90 total, мин)</h3>
+        <table id="sim-d-group-table">
+          <thead>
+            <tr>
+              <th>Группа D</th>
+              <th>Монолит total</th>
+              <th>Sharding total</th>
+              <th>Δ total</th>
+              <th>Δ %</th>
+              <th>Вердикт</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+        <h3>По часам UTC (пик 09–15, все D)</h3>
+        <table id="sim-hour-table">
+          <thead>
+            <tr>
+              <th>Час</th>
+              <th>n</th>
+              <th>mono wait</th>
+              <th>shard wait</th>
+              <th>mono work</th>
+              <th>shard work</th>
+              <th>mono total</th>
+              <th>shard total</th>
+              <th>Δ total</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+        <h3>Сравнение квот (overall p90)</h3>
+        <table id="sim-config-compare">
+          <thead>
+            <tr>
+              <th>Конфиг</th>
+              <th>VM budget</th>
+              <th>mono total</th>
+              <th>shard total</th>
+              <th>Δ wait</th>
+              <th>Δ work</th>
+              <th>Δ total</th>
+              <th>Δ total %</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
 
     <section id="quota-scenarios">
       <h2>Сценарии квот</h2>
@@ -493,8 +614,7 @@
         </tbody>
       </table>
       <p class="note">
-        Для точных цифр по вашей истории: <code>jupyter notebook notebooks/capacity_explorer.ipynb</code>
-        → секции 2–4. Кэш: <code>data/cache/jobs_*.json</code>.
+        Ниже — справочник метрик. Реальные цифры по истории jobs — в секции «Симуляция на реальной истории» выше.
       </p>
     </section>
 
@@ -735,6 +855,199 @@
     renderBenefits();
     renderTiers();
     updateInteractive();
+
+    let simData = null;
+    let activeConfig = "current";
+    let charts = { total: null, waitWork: null };
+
+    function verdictClass(delta) {
+      if (delta == null) return "";
+      if (delta < -1) return "good";
+      if (delta > 1) return "bad";
+      return "warn";
+    }
+
+    function verdictText(delta) {
+      if (delta == null) return "—";
+      if (delta < -1) return "Sharding быстрее";
+      if (delta > 1) return "Монолит быстрее";
+      return "≈ паритет";
+    }
+
+    function fmtMin(v) {
+      if (v == null || Number.isNaN(v)) return "—";
+      return v.toFixed(1);
+    }
+
+    function fmtPctVal(v) {
+      if (v == null || Number.isNaN(v)) return "—";
+      const sign = v > 0 ? "+" : "";
+      return sign + v.toFixed(1) + "%";
+    }
+
+    function scenarioByName(name) {
+      return (simData?.scenarios || []).find((s) => s.config === name);
+    }
+
+    function renderSimMeta() {
+      const m = simData.meta;
+      const since = (m.since || "").slice(0, 10);
+      const until = (m.until || "").slice(0, 10);
+      document.getElementById("sim-desc").textContent =
+        `Предрасчёт симулятора по ${m.jobs_count} jobs (${m.repo}, ${since} … ${until}). Rollout: ${m.rollout}. Пик: ${m.peak_hours[0]}:00–${m.peak_hours[m.peak_hours.length - 1]}:00 UTC.`;
+      document.getElementById("sim-meta").innerHTML = [
+        `${m.jobs_count} jobs`,
+        `${m.pr_runs_count} PR-check runs`,
+        `classify=${m.classify}`,
+        `сгенерировано ${(m.generated_at || "").slice(0, 16).replace("T", " ")} UTC`,
+      ].map((t) => `<span class="pill">${t}</span>`).join("");
+    }
+
+    function renderConfigTabs() {
+      const tabs = document.getElementById("config-tabs");
+      tabs.innerHTML = simData.scenarios.map((s) =>
+        `<button type="button" class="config-tab ${s.config === activeConfig ? "active" : ""}" data-config="${s.config}">${s.config}</button>`
+      ).join("");
+      tabs.querySelectorAll(".config-tab").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          activeConfig = btn.dataset.config;
+          renderSimulation();
+        });
+      });
+    }
+
+    function renderConfigCompare() {
+      const tbody = document.querySelector("#sim-config-compare tbody");
+      tbody.innerHTML = simData.scenarios.map((s) => {
+        const o = s.overall || {};
+        const cls = verdictClass(o.delta_total);
+        return `<tr class="${s.config === "current" ? "highlight" : ""}">
+          <td><strong>${s.config}</strong></td>
+          <td class="num">${s.vm_budget}</td>
+          <td class="num">${fmtMin(o.mono_total_p90)}</td>
+          <td class="num">${fmtMin(o.shard_total_p90)}</td>
+          <td class="num ${o.delta_wait > 0 ? "bad" : "good"}">${fmtMin(o.delta_wait)}</td>
+          <td class="num ${o.delta_work > 0 ? "bad" : "good"}">${fmtMin(o.delta_work)}</td>
+          <td class="num ${cls}">${fmtMin(o.delta_total)}</td>
+          <td class="num ${cls}">${fmtPctVal(o.delta_total_pct)}</td>
+        </tr>`;
+      }).join("");
+    }
+
+    function renderDGroupTable(scenario) {
+      const tbody = document.querySelector("#sim-d-group-table tbody");
+      tbody.innerHTML = (scenario.by_d_group || []).map((row) => {
+        const cls = verdictClass(row.delta_total);
+        return `<tr>
+          <td>${row.d_group}</td>
+          <td class="num">${fmtMin(row.mono_total_p90)}</td>
+          <td class="num">${fmtMin(row.shard_total_p90)}</td>
+          <td class="num ${cls}">${fmtMin(row.delta_total)}</td>
+          <td class="num ${cls}">${fmtPctVal(row.delta_total_pct)}</td>
+          <td class="${cls}">${verdictText(row.delta_total)}</td>
+        </tr>`;
+      }).join("");
+    }
+
+    function renderHourTable(scenario) {
+      const tbody = document.querySelector("#sim-hour-table tbody");
+      tbody.innerHTML = (scenario.by_hour || []).map((row) => {
+        const cls = verdictClass(row.delta_total);
+        return `<tr>
+          <td class="num">${row.hour_utc}</td>
+          <td class="num">${row.n}</td>
+          <td class="num">${fmtMin(row.mono_wait_p90)}</td>
+          <td class="num">${fmtMin(row.shard_wait_p90)}</td>
+          <td class="num">${fmtMin(row.mono_work_p90)}</td>
+          <td class="num">${fmtMin(row.shard_work_p90)}</td>
+          <td class="num">${fmtMin(row.mono_total_p90)}</td>
+          <td class="num">${fmtMin(row.shard_total_p90)}</td>
+          <td class="num ${cls}">${fmtMin(row.delta_total)}</td>
+        </tr>`;
+      }).join("");
+    }
+
+    function renderCharts() {
+      const labels = simData.scenarios.map((s) => s.config);
+      const monoTotals = simData.scenarios.map((s) => s.overall?.mono_total_p90 ?? 0);
+      const shardTotals = simData.scenarios.map((s) => s.overall?.shard_total_p90 ?? 0);
+
+      if (charts.total) charts.total.destroy();
+      charts.total = new Chart(document.getElementById("chart-total"), {
+        type: "bar",
+        data: {
+          labels,
+          datasets: [
+            { label: "Монолит total p90", data: monoTotals, backgroundColor: "#4c78a8" },
+            { label: "Sharding total p90", data: shardTotals, backgroundColor: "#72b7b2" },
+          ],
+        },
+        options: {
+          responsive: true,
+          plugins: { legend: { labels: { color: "#e8edf5" } } },
+          scales: {
+            x: { ticks: { color: "#8b9bb4" }, grid: { color: "#2a3548" } },
+            y: { title: { display: true, text: "мин", color: "#8b9bb4" }, ticks: { color: "#8b9bb4" }, grid: { color: "#2a3548" } },
+          },
+        },
+      });
+
+      const scenario = scenarioByName(activeConfig);
+      const o = scenario?.overall || {};
+      if (charts.waitWork) charts.waitWork.destroy();
+      charts.waitWork = new Chart(document.getElementById("chart-wait-work"), {
+        type: "bar",
+        data: {
+          labels: ["Монолит", "Sharding"],
+          datasets: [
+            { label: "wait p90", data: [o.mono_wait_p90 ?? 0, o.shard_wait_p90 ?? 0], backgroundColor: "#e45756" },
+            { label: "work p90", data: [o.mono_work_p90 ?? 0, o.shard_work_p90 ?? 0], backgroundColor: "#4c78a8" },
+          ],
+        },
+        options: {
+          responsive: true,
+          plugins: { legend: { labels: { color: "#e8edf5" } } },
+          scales: {
+            x: { ticks: { color: "#8b9bb4" }, grid: { color: "#2a3548" } },
+            y: { title: { display: true, text: "мин", color: "#8b9bb4" }, ticks: { color: "#8b9bb4" }, grid: { color: "#2a3548" } },
+          },
+        },
+      });
+    }
+
+    function renderSimulation() {
+      if (!simData) return;
+      renderConfigTabs();
+      const scenario = scenarioByName(activeConfig);
+      if (!scenario?.overall) return;
+      const o = scenario.overall;
+      const cls = verdictClass(o.delta_total);
+      document.getElementById("sim-verdict").innerHTML =
+        `<span class="${cls}">${activeConfig}</span>: sharding ${o.delta_total < 0 ? "выигрывает" : o.delta_total > 0 ? "проигрывает" : "≈ паритет"} ` +
+        `по total p90 (${fmtMin(o.mono_total_p90)} → ${fmtMin(o.shard_total_p90)} мин, Δ ${fmtMin(o.delta_total)}, ${fmtPctVal(o.delta_total_pct)}). ` +
+        `Wait ${fmtMin(o.delta_wait)} мин, work ${fmtMin(o.delta_work)} мин.`;
+      renderDGroupTable(scenario);
+      renderHourTable(scenario);
+      renderConfigCompare();
+      renderCharts();
+    }
+
+    async function loadSimulationData() {
+      try {
+        const resp = await fetch("simulation_results.json", { cache: "no-store" });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        simData = await resp.json();
+        document.getElementById("sim-loading").classList.add("hidden");
+        document.getElementById("sim-content").classList.remove("hidden");
+        renderSimMeta();
+        renderSimulation();
+      } catch (err) {
+        document.getElementById("sim-loading").textContent =
+          `Нет предрасчёта (${err.message}). Запустите: python3 scripts/export_comparison_data.py --collect --days 7 --workflows PR-check`;
+      }
+    }
+
+    loadSimulationData();
   </script>
 </body>
 </html>
