@@ -328,6 +328,44 @@
       margin: 0.5rem 0 1rem;
     }
 
+    .exec-summary {
+      background: linear-gradient(135deg, rgba(79, 140, 255, 0.12), rgba(61, 214, 197, 0.08));
+      border: 1px solid rgba(79, 140, 255, 0.35);
+      border-radius: 12px;
+      padding: 1.1rem 1.2rem;
+      margin-bottom: 1.25rem;
+    }
+
+    .exec-summary h3 {
+      margin: 0 0 0.75rem;
+      color: var(--accent-2);
+      font-size: 1.05rem;
+    }
+
+    .exec-summary p {
+      margin: 0.5rem 0;
+      font-size: 1rem;
+      line-height: 1.6;
+    }
+
+    .exec-summary strong { color: var(--text); }
+
+    .decision-table tr.baseline td { background: rgba(228, 87, 86, 0.08); }
+    .decision-table tr.recommended td { background: rgba(62, 207, 142, 0.1); }
+    .decision-table tr.quota td { background: rgba(79, 140, 255, 0.06); }
+
+    .decision-table .scenario-label {
+      font-weight: 600;
+    }
+
+    .decision-table .sub {
+      display: block;
+      font-size: 0.82rem;
+      color: var(--muted);
+      font-weight: 400;
+      margin-top: 0.15rem;
+    }
+
     .hidden { display: none; }
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
@@ -349,10 +387,30 @@
     </header>
 
     <section id="simulation-data">
-      <h2>Симуляция на реальной истории (7 дней)</h2>
-      <p class="section-desc" id="sim-desc">Загрузка предрасчитанных p90 wait / work / total…</p>
+      <h2>Что произойдёт при внедрении</h2>
+      <p class="section-desc" id="sim-desc">Загрузка симуляции по реальной истории PR-check…</p>
       <div id="sim-loading" class="note">Загружаем <code>simulation_results.json</code>…</div>
       <div id="sim-content" class="hidden">
+        <div class="exec-summary" id="exec-summary"></div>
+
+        <h3>Сравнение сценариев (p90, пик 09–15 UTC, 7 дней истории)</h3>
+        <p class="section-desc">
+          Одна строка = один вариант будущего. <strong>Total</strong> = ожидание + выполнение — то, что чувствует разработчик.
+        </p>
+        <table class="decision-table" id="decision-table">
+          <thead>
+            <tr>
+              <th>Сценарий</th>
+              <th>Total p90</th>
+              <th>Ожидание p90</th>
+              <th>Выполнение p90</th>
+              <th>vs монолит сейчас</th>
+              <th>vs sharding на текущих квотах</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+
         <div class="sim-meta" id="sim-meta"></div>
         <div class="config-tabs" id="config-tabs"></div>
         <p class="verdict" id="sim-verdict"></p>
@@ -889,6 +947,109 @@
       return (simData?.scenarios || []).find((s) => s.config === name);
     }
 
+    function renderExecutiveSummary() {
+      const cur = scenarioByName("current");
+      const mono = cur?.overall;
+      const shardCur = cur?.overall;
+      if (!mono || !shardCur) return;
+
+      const heavyBest = (cur.by_d_group || [])
+        .filter((r) => r.d_group !== "D < 60")
+        .sort((a, b) => (a.delta_total_pct || 0) - (b.delta_total_pct || 0))[0];
+      const light = (cur.by_d_group || []).find((r) => r.d_group === "D < 60");
+      const worstHour = (cur.by_hour || []).reduce((a, b) =>
+        (b.delta_wait || 0) > (a.delta_wait || 0) ? b : a, { delta_wait: 0, hour_utc: "—" });
+
+      const shardAll25 = scenarioByName("all+25%")?.overall;
+      const extraQuota = shardAll25
+        ? shardCur.shard_total_p90 - shardAll25.shard_total_p90
+        : 0;
+        <h3>Главный вывод</h3>
+        <p>
+          <strong>1. Внедрить sharding при текущих квотах</strong> — PR-check в пике ускорятся примерно в
+          <strong>${(mono.mono_total_p90 / shardCur.shard_total_p90).toFixed(1)}×</strong>
+          (total p90: ${fmtMin(mono.mono_total_p90)} → ${fmtMin(shardCur.shard_total_p90)} мин, ${fmtPctVal(shardCur.delta_total_pct)}).
+          Очередь почти не растёт (+${fmtMin(shardCur.delta_wait)} мин wait p90) — пул сейчас не забит.
+        </p>
+        <p>
+          <strong>2. Оставить монолит</strong> — ничего не меняется: ~${fmtMin(mono.mono_total_p90)} мин total p90,
+          из них ~${fmtMin(mono.mono_work_p90)} мин чистого выполнения.
+        </p>
+        <p>
+          <strong>3. Увеличить квоты</strong> — монолиту почти не помогает (total p90 остаётся ~${fmtMin(mono.mono_total_p90)} мин).
+          Sharding станет ещё быстрее на <strong>~${fmtMin(extraQuota)} мин</strong> (all+25%: ${fmtMin(shardAll25?.shard_total_p90)} мин total).
+          Это <em>дополнительный</em> эффект поверх sharding, не замена ему.
+        </p>
+        <p>
+          <strong>Где выигрыш:</strong> тяжёлые PR (D ≥ 60 мин) — до ${fmtPctVal(heavy[0]?.delta_total_pct)} total;
+          лёгкие PR (D &lt; 60) — без изменений (${fmtPctVal(light?.delta_total_pct)}).
+          В самый загруженный час (${worstHour.hour_utc}) wait у sharding +${fmtMin(worstHour.delta_wait)} мин,
+          но total всё равно ниже на ${fmtMin(Math.abs(worstHour.delta_total))} мин.
+        </p>
+      `;
+    }
+
+    function renderDecisionTable() {
+      const cur = scenarioByName("current");
+      const mono = cur?.overall;
+      const shardBase = cur?.overall?.shard_total_p90;
+      if (!mono) return;
+
+      const rows = [
+        {
+          cls: "baseline",
+          label: "Монолит",
+          sub: "как сейчас, текущие квоты",
+          total: mono.mono_total_p90,
+          wait: mono.mono_wait_p90,
+          work: mono.mono_work_p90,
+          vsMono: "—",
+          vsShard: "—",
+        },
+        {
+          cls: "recommended",
+          label: "Sharding",
+          sub: "внедрить сейчас, текущие квоты",
+          total: mono.shard_total_p90,
+          wait: mono.shard_wait_p90,
+          work: mono.shard_work_p90,
+          vsMono: fmtPctVal(mono.delta_total_pct),
+          vsShard: "—",
+        },
+      ];
+
+      for (const name of ["vcpu+10%", "all+25%", "all x2"]) {
+        const s = scenarioByName(name);
+        const o = s?.overall;
+        if (!o) continue;
+        rows.push({
+          cls: "quota",
+          label: `Sharding + ${name}`,
+          sub: `квоты ×${name === "all x2" ? "2" : name === "all+25%" ? "1.25" : "vCPU 1.1"}`,
+          total: o.shard_total_p90,
+          wait: o.shard_wait_p90,
+          work: o.shard_work_p90,
+          vsMono: fmtPctVal(100 * (o.shard_total_p90 - mono.mono_total_p90) / mono.mono_total_p90),
+          vsShard: (o.shard_total_p90 - shardBase) <= 0
+            ? fmtMin(o.shard_total_p90 - shardBase) + " мин"
+            : "+" + fmtMin(o.shard_total_p90 - shardBase) + " мин",
+        });
+      }
+
+      document.querySelector("#decision-table tbody").innerHTML = rows.map((r) => {
+        const totalCls = r.cls === "baseline" ? "" : "good";
+        const waitCls = (r.wait || 0) > 5 ? "warn" : "";
+        return `<tr class="${r.cls}">
+          <td><span class="scenario-label">${r.label}</span><span class="sub">${r.sub}</span></td>
+          <td class="num ${totalCls}"><strong>${fmtMin(r.total)}</strong> мин</td>
+          <td class="num ${waitCls}">${fmtMin(r.wait)} мин</td>
+          <td class="num">${fmtMin(r.work)} мин</td>
+          <td class="num ${r.vsMono.startsWith("-") ? "good" : ""}">${r.vsMono}</td>
+          <td class="num ${r.vsShard.startsWith("-") ? "good" : ""}">${r.vsShard}</td>
+        </tr>`;
+      }).join("");
+    }
+
     function renderSimMeta() {
       const m = simData.meta;
       const since = (m.since || "").slice(0, 10);
@@ -1017,6 +1178,8 @@
 
     function renderSimulation() {
       if (!simData) return;
+      renderExecutiveSummary();
+      renderDecisionTable();
       renderConfigTabs();
       const scenario = scenarioByName(activeConfig);
       if (!scenario?.overall) return;
