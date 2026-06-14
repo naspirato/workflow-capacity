@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+
+from workflow_capacity.log import status
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CACHE_DIR = ROOT / "data" / "cache"
@@ -75,10 +78,23 @@ def ensure_dataset(
     since = since or (until - timedelta(days=days or 14))
     path = cache_path(cache_dir, repo, since, until)
     if path.exists() and not refresh:
-        return JobsDataset.load(path)
+        try:
+            dataset = JobsDataset.load(path)
+            status(
+                f"cache: loaded {path.name} "
+                f"({len(dataset.jobs)} jobs, {dataset.since[:10]} .. {dataset.until[:10]})"
+            )
+            return dataset
+        except (json.JSONDecodeError, KeyError):
+            status(f"cache: corrupt file {path.name}, re-collecting from GitHub ...")
+            path.unlink(missing_ok=True)
 
     from workflow_capacity.collect import collect_window
 
+    status(
+        f"cache: downloading {path.name} "
+        f"({since.date()} .. {until.date()}, refresh={refresh}) ..."
+    )
     payload = collect_window(repo=repo, since=since, until=until, output=path)
     dataset = JobsDataset(
         path=path,
@@ -91,6 +107,8 @@ def ensure_dataset(
     if augment:
         from workflow_capacity.augment import augment_file
 
+        status(f"cache: augmenting PR metadata in {path.name} ...")
         augment_file(path, repo=repo)
         dataset = JobsDataset.load(path)
+    status(f"cache: ready — {len(dataset.jobs)} jobs in {path.name}")
     return dataset

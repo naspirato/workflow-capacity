@@ -11,6 +11,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from workflow_capacity.log import status
+
 REPO = "ydb-platform/ydb"
 REPO_OWNER, REPO_NAME = REPO.split("/", 1)
 
@@ -268,8 +270,10 @@ def augment(path: Path, *, resolve_run_sha: bool) -> dict[str, int]:
     sha_cache: dict[str, PrMeta] = {}
     run_meta: dict[int, PrMeta] = {}
     sources: dict[str, int] = {}
+    total_runs = len(run_info)
+    status(f"augment: resolving base_ref for {total_runs} PR-check runs ...")
 
-    for rid, info in run_info.items():
+    for idx, (rid, info) in enumerate(run_info.items(), 1):
         meta = resolve_run_meta(
             pr_number=info.get("pr_number"),  # type: ignore[arg-type]
             head_branch=str(info.get("head_branch") or ""),
@@ -280,6 +284,8 @@ def augment(path: Path, *, resolve_run_sha: bool) -> dict[str, int]:
         )
         run_meta[rid] = meta
         sources[meta.source] = sources.get(meta.source, 0) + 1
+        if idx % 100 == 0 or idx == total_runs:
+            status(f"  augment: {idx}/{total_runs} runs resolved ...")
 
     if resolve_run_sha:
         missing_rids = [rid for rid, meta in run_meta.items() if not meta.base_ref]
@@ -328,7 +334,7 @@ def augment(path: Path, *, resolve_run_sha: bool) -> dict[str, int]:
             updated_jobs += 1
 
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    return {
+    stats = {
         "pr_check_runs": len(run_info),
         "prs_cached": len(pr_cache),
         "heads_cached": len(head_cache),
@@ -336,6 +342,11 @@ def augment(path: Path, *, resolve_run_sha: bool) -> dict[str, int]:
         "jobs_updated": updated_jobs,
         **sources,
     }
+    status(
+        f"augment: done — {updated_jobs} jobs updated, "
+        f"sources: {', '.join(f'{k}={v}' for k, v in sorted(sources.items()))}"
+    )
+    return stats
 
 
 def augment_file(
