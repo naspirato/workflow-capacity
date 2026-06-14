@@ -1,0 +1,740 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Workflow Capacity — сравнение квот и sharding</title>
+  <style>
+    :root {
+      --bg: #0b0f14;
+      --surface: #121820;
+      --surface-2: #1a2230;
+      --border: #2a3548;
+      --text: #e8edf5;
+      --muted: #8b9bb4;
+      --accent: #4f8cff;
+      --accent-2: #3dd6c5;
+      --good: #3ecf8e;
+      --warn: #f0b429;
+      --bad: #f07178;
+      --mono-bg: #1e2a3d;
+      --shard-bg: #1a2e2a;
+      --radius: 12px;
+      --shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+      background: radial-gradient(1200px 600px at 10% -10%, #1a2740 0%, transparent 60%),
+                  radial-gradient(900px 500px at 90% 0%, #12302c 0%, transparent 55%),
+                  var(--bg);
+      color: var(--text);
+      line-height: 1.55;
+    }
+
+    .wrap {
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 2rem 1.25rem 4rem;
+    }
+
+    header {
+      margin-bottom: 2rem;
+    }
+
+    h1 {
+      font-size: clamp(1.8rem, 4vw, 2.6rem);
+      margin: 0 0 0.5rem;
+      letter-spacing: -0.02em;
+    }
+
+    .subtitle {
+      color: var(--muted);
+      font-size: 1.05rem;
+      max-width: 720px;
+    }
+
+    .pill-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      margin-top: 1rem;
+    }
+
+    .pill {
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 0.25rem 0.75rem;
+      font-size: 0.85rem;
+      color: var(--muted);
+    }
+
+    section {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1.25rem 1.35rem;
+      margin-bottom: 1.25rem;
+      box-shadow: var(--shadow);
+    }
+
+    h2 {
+      margin: 0 0 0.35rem;
+      font-size: 1.25rem;
+    }
+
+    h3 {
+      margin: 1.25rem 0 0.5rem;
+      font-size: 1rem;
+      color: var(--accent-2);
+    }
+
+    .section-desc {
+      color: var(--muted);
+      margin: 0 0 1rem;
+      font-size: 0.95rem;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.92rem;
+    }
+
+    th, td {
+      border-bottom: 1px solid var(--border);
+      padding: 0.65rem 0.55rem;
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      color: var(--muted);
+      font-weight: 600;
+      font-size: 0.82rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    tr:last-child td { border-bottom: none; }
+
+    .num { font-variant-numeric: tabular-nums; }
+    .highlight { background: rgba(79, 140, 255, 0.08); }
+    .good { color: var(--good); }
+    .warn { color: var(--warn); }
+    .bad { color: var(--bad); }
+
+    .grid-2 {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 1rem;
+    }
+
+    .card {
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1rem;
+    }
+
+    .card h3 { margin-top: 0; }
+
+    .card ul {
+      margin: 0.5rem 0 0;
+      padding-left: 1.1rem;
+      color: var(--muted);
+      font-size: 0.92rem;
+    }
+
+    .card li + li { margin-top: 0.35rem; }
+
+    .compare-cols {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1rem;
+    }
+
+    .mono-col {
+      background: var(--mono-bg);
+      border-radius: 10px;
+      padding: 1rem;
+      border: 1px solid #334766;
+    }
+
+    .shard-col {
+      background: var(--shard-bg);
+      border-radius: 10px;
+      padding: 1rem;
+      border: 1px solid #2d5a52;
+    }
+
+    .tag {
+      display: inline-block;
+      font-size: 0.75rem;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      margin-bottom: 0.5rem;
+      opacity: 0.85;
+    }
+
+    .slider-block {
+      margin-bottom: 0.85rem;
+    }
+
+    .slider-block label {
+      display: flex;
+      justify-content: space-between;
+      font-size: 0.9rem;
+      margin-bottom: 0.25rem;
+    }
+
+    input[type="range"] {
+      width: 100%;
+      accent-color: var(--accent);
+    }
+
+    .live-stats {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+      gap: 0.75rem;
+      margin-top: 1rem;
+    }
+
+    .stat {
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 0.75rem;
+    }
+
+    .stat .label {
+      font-size: 0.78rem;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    .stat .value {
+      font-size: 1.35rem;
+      font-weight: 700;
+      margin-top: 0.15rem;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .delta-bar {
+      height: 8px;
+      background: #1f2937;
+      border-radius: 4px;
+      overflow: hidden;
+      margin-top: 0.35rem;
+    }
+
+    .delta-bar > span {
+      display: block;
+      height: 100%;
+      background: linear-gradient(90deg, var(--accent), var(--accent-2));
+      border-radius: 4px;
+    }
+
+    .note {
+      background: rgba(240, 180, 41, 0.08);
+      border: 1px solid rgba(240, 180, 41, 0.25);
+      border-radius: 8px;
+      padding: 0.75rem 1rem;
+      color: #e8d7a8;
+      font-size: 0.9rem;
+      margin-top: 1rem;
+    }
+
+    footer {
+      color: var(--muted);
+      font-size: 0.85rem;
+      text-align: center;
+      margin-top: 1.5rem;
+    }
+
+    code {
+      background: #0f1520;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 0.1rem 0.35rem;
+      font-size: 0.85em;
+    }
+
+    @media (max-width: 720px) {
+      .compare-cols { grid-template-columns: 1fr; }
+      table { font-size: 0.82rem; }
+      th, td { padding: 0.5rem 0.35rem; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>Workflow Capacity: отличия и выгоды</h1>
+      <p class="subtitle">
+        Сравнение <strong>монолит vs PR-check sharding</strong> и эффекта <strong>увеличения квот</strong>
+        Yandex Cloud Compute для self-hosted GitHub Actions runner pool.
+        Числа бюджета VM рассчитаны из <code>config/capacity.example.yml</code>.
+      </p>
+      <div class="pill-row">
+        <span class="pill">p90 wait / work / total</span>
+        <span class="pill">кэш jobs не перевыкачивается при смене квот</span>
+        <span class="pill">peak 09:00–16:59 UTC → cap 4 shard</span>
+      </div>
+    </header>
+
+    <section id="quota-scenarios">
+      <h2>Сценарии квот</h2>
+      <p class="section-desc">
+        Базовый folder и три типичных шага масштабирования из ноутбука
+        <code>notebooks/capacity_explorer.ipynb</code>.
+        <em>VM budget</em> — сколько auto-provisioned VM можно поднять после static runners, reserved и headroom 90%.
+      </p>
+      <table id="quota-table">
+        <thead>
+          <tr>
+            <th>Сценарий</th>
+            <th>Instances</th>
+            <th>vCPU</th>
+            <th>RAM, GB</th>
+            <th>SSD, GB</th>
+            <th>VM budget</th>
+            <th>Δ budget</th>
+            <th>relwithdebinfo*</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+      <p class="section-desc" style="margin-top:0.75rem;margin-bottom:0;">
+        * Одновременных <code>build-preset-relwithdebinfo</code> (64 vCPU, 256 GB) по лимитирующему ресурсу.
+      </p>
+    </section>
+
+    <section id="quota-benefits">
+      <h2>Выгоды увеличения квот</h2>
+      <p class="section-desc">Что даёт каждый сценарий относительно текущего состояния.</p>
+      <div class="grid-2" id="benefit-cards"></div>
+    </section>
+
+    <section id="strategy">
+      <h2>Монолит vs Sharding — отличия</h2>
+      <p class="section-desc">Два режима исполнения PR-check relwithdebinfo, которые сравнивает симулятор.</p>
+      <div class="compare-cols">
+        <div class="mono-col">
+          <div class="tag">Монолит</div>
+          <ul>
+            <li>1 VM на весь PR-check job</li>
+            <li>Меньший burst по пулу — проще вписаться в квоты</li>
+            <li>Оптимален для лёгких PR (D &lt; 60 мин)</li>
+            <li>Wait обычно ниже при том же пуле</li>
+            <li>Work = полное время компиляции/тестов на одной машине</li>
+          </ul>
+        </div>
+        <div class="shard-col">
+          <div class="tag">PR-check sharding</div>
+          <ul>
+            <li>Prepare VM + N параллельных shard VM</li>
+            <li>Сильно сокращает <strong>work</strong> на тяжёлых PR (D ≥ 60 мин)</li>
+            <li>Требует N+1 раннеров одновременно → выше риск очереди</li>
+            <li>~8% overhead на фазу тестов (SHARD_OVERHEAD 1.08)</li>
+            <li>На пике UTC shard cap = 4 независимо от tier</li>
+          </ul>
+        </div>
+      </div>
+
+      <h3>Когда sharding выигрывает по total time</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>Группа D</th>
+            <th>Shard count</th>
+            <th>Типичный эффект</th>
+            <th>Условие выигрыша</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>D &lt; 60 мин</td>
+            <td class="num">1</td>
+            <td>Без sharding</td>
+            <td>Монолит ≈ sharding</td>
+          </tr>
+          <tr class="highlight">
+            <td>60 ≤ D &lt; 120 мин</td>
+            <td class="num">4</td>
+            <td class="good">−20…−40% work</td>
+            <td>Квота позволяет 4+1 раннеров без длинной очереди</td>
+          </tr>
+          <tr class="highlight">
+            <td>120 ≤ D &lt; 200 мин</td>
+            <td class="num">8 (peak: 4)</td>
+            <td class="good">−35…−55% work</td>
+            <td>Выигрыш растёт, но wait растёт при узком пуле</td>
+          </tr>
+          <tr class="highlight">
+            <td>D ≥ 200 мин</td>
+            <td class="num">12 (peak: 4)</td>
+            <td class="good">−50…−65% work</td>
+            <td>Максимальный профит wall-clock; критичен VM budget</td>
+          </tr>
+        </tbody>
+      </table>
+      <p class="note">
+        Проценты work — ориентир по модели (параллель тестов / overhead), не замена симуляции.
+        Реальные p90 wait/work/total — из прогона ноутбука на кэшированной истории jobs.
+      </p>
+    </section>
+
+    <section id="sharding-tiers">
+      <h2>Tier'ы sharding по размеру job</h2>
+      <p class="section-desc">D = оценка длительности одного монолитного job (мин), 52 потока.</p>
+      <table>
+        <thead>
+          <tr>
+            <th>Оценка D</th>
+            <th>Shards</th>
+            <th>Раннеров на job (prepare + shards)</th>
+            <th>Нагрузка на пул</th>
+          </tr>
+        </thead>
+        <tbody id="tier-table"></tbody>
+      </table>
+    </section>
+
+    <section id="interactive">
+      <h2>Интерактив: свои множители квот</h2>
+      <p class="section-desc">Как слайдеры в ноутбуке — мгновенно пересчитывает бюджет без перевыкачки jobs.</p>
+      <div class="grid-2">
+        <div>
+          <div class="slider-block">
+            <label>Instances × <span id="inst-val">1.00</span></label>
+            <input type="range" id="inst-mult" min="0.5" max="2.5" step="0.05" value="1" />
+          </div>
+          <div class="slider-block">
+            <label>vCPU × <span id="vcpu-val">1.00</span></label>
+            <input type="range" id="vcpu-mult" min="0.5" max="2.5" step="0.05" value="1" />
+          </div>
+          <div class="slider-block">
+            <label>RAM × <span id="ram-val">1.00</span></label>
+            <input type="range" id="ram-mult" min="0.5" max="2.5" step="0.05" value="1" />
+          </div>
+          <div class="slider-block">
+            <label>SSD × <span id="ssd-val">1.00</span></label>
+            <input type="range" id="ssd-mult" min="0.5" max="2.5" step="0.05" value="1" />
+          </div>
+        </div>
+        <div>
+          <div class="live-stats" id="live-stats"></div>
+          <div class="note" id="interactive-insight"></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="decision">
+      <h2>Когда увеличивать квоты — чеклист</h2>
+      <div class="grid-2">
+        <div class="card">
+          <h3 class="good">Квоты помогут, если</h3>
+          <ul>
+            <li>Высокий <strong>wait p90</strong> в пиковые часы (09–15 UTC)</li>
+            <li>Sharding быстрее по work, но <strong>delta_total &gt; 0</strong> из-за очереди</li>
+            <li><code>capacity_cap</code> режет желаемое число шардов</li>
+            <li>Много PR в группах D ≥ 60 мин</li>
+            <li>Пул часто saturated (<code>saturated_seconds</code> высокий в симуляции)</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3 class="warn">Квоты не решат, если</h3>
+          <ul>
+            <li>Узкое место — compile phase, а не test/shard</li>
+            <li>Большинство PR лёгкие (D &lt; 60) — sharding не включается</li>
+            <li>Peak cap 4 shard ограничивает выигрыш в рабочие часы</li>
+            <li>Проблема в classifier / eligibility, а не в ёмкости пула</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section id="metrics">
+      <h2>Метрики сравнения (из симулятора)</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Метрика</th>
+            <th>Что значит</th>
+            <th>Монолит</th>
+            <th>Sharding</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>wait p90</strong></td>
+            <td>Время в очереди до выделения раннера</td>
+            <td class="good">Обычно ниже</td>
+            <td class="warn">Выше при burst N+1 VM</td>
+          </tr>
+          <tr>
+            <td><strong>work p90</strong></td>
+            <td>Активное время на раннере</td>
+            <td class="warn">Полный job на 1 VM</td>
+            <td class="good">Сжато за счёт параллели</td>
+          </tr>
+          <tr>
+            <td><strong>total p90</strong></td>
+            <td>wait + work — UX разработчика</td>
+            <td colspan="2">Главная метрика; отрицательный <code>delta_total_pct</code> = sharding быстрее</td>
+          </tr>
+        </tbody>
+      </table>
+      <p class="note">
+        Для точных цифр по вашей истории: <code>jupyter notebook notebooks/capacity_explorer.ipynb</code>
+        → секции 2–4. Кэш: <code>data/cache/jobs_*.json</code>.
+      </p>
+    </section>
+
+    <footer>
+      workflow-capacity · config/capacity.example.yml · откройте этот файл напрямую в браузере
+    </footer>
+  </div>
+
+  <script>
+    const BASE = {
+      quotas: { instances: 110, vcpu: 5400, ram_gb: 23000, nrd_ssd_gb: 200000 },
+      static: { instances: 28, vcpu: 280, ram_gb: 920, nrd_ssd_gb: 20800 },
+      headroom: 0.9,
+      footprint: { vcpu: 64, ram_gb: 256, nrd_ssd_gb: 2417 },
+    };
+
+    const SCENARIOS = [
+      { name: "current", inst: 1, vcpu: 1, ram: 1, ssd: 1 },
+      { name: "vcpu+10%", inst: 1, vcpu: 1.1, ram: 1, ssd: 1 },
+      { name: "all+25%", inst: 1.25, vcpu: 1.25, ram: 1.25, ssd: 1.25 },
+      { name: "all x2", inst: 2, vcpu: 2, ram: 2, ssd: 2 },
+    ];
+
+    const TIERS = [
+      { label: "D < 60 мин", shards: 1 },
+      { label: "60 ≤ D < 120 мин", shards: 4 },
+      { label: "120 ≤ D < 200 мин", shards: 8, peak: 4 },
+      { label: "D ≥ 200 мин", shards: 12, peak: 4 },
+    ];
+
+    function scaleQuotas(mult) {
+      return {
+        instances: Math.floor(BASE.quotas.instances * mult.inst),
+        vcpu: Math.floor(BASE.quotas.vcpu * mult.vcpu),
+        ram_gb: Math.floor(BASE.quotas.ram_gb * mult.ram),
+        nrd_ssd_gb: Math.floor(BASE.quotas.nrd_ssd_gb * mult.ssd),
+      };
+    }
+
+    function availableBudget(q) {
+      const h = BASE.headroom;
+      return {
+        instances: (q.instances - BASE.static.instances) * h,
+        vcpu: (q.vcpu - BASE.static.vcpu) * h,
+        ram_gb: (q.ram_gb - BASE.static.ram_gb) * h,
+        nrd_ssd_gb: (q.nrd_ssd_gb - BASE.static.nrd_ssd_gb) * h,
+      };
+    }
+
+    function maxConcurrentRelwithdebinfo(budget) {
+      const fp = BASE.footprint;
+      return Math.min(
+        Math.floor(budget.instances),
+        Math.floor(budget.vcpu / fp.vcpu),
+        Math.floor(budget.ram_gb / fp.ram_gb),
+        Math.floor(budget.nrd_ssd_gb / fp.nrd_ssd_gb),
+      );
+    }
+
+    function maxHeavyShardJobs(budget, shards) {
+      const fp = BASE.footprint;
+      const perJob = { instances: shards + 1, vcpu: fp.vcpu * (shards + 1), ram_gb: fp.ram_gb * (shards + 1) };
+      return Math.min(
+        Math.floor(budget.instances / perJob.instances),
+        Math.floor(budget.vcpu / perJob.vcpu),
+        Math.floor(budget.ram_gb / perJob.ram_gb),
+      );
+    }
+
+    function fmt(n) {
+      return n.toLocaleString("ru-RU");
+    }
+
+    function fmtPct(cur, base) {
+      if (base === 0) return "—";
+      const p = ((cur - base) / base) * 100;
+      const sign = p > 0 ? "+" : "";
+      return sign + p.toFixed(0) + "%";
+    }
+
+    function renderQuotaTable() {
+      const tbody = document.querySelector("#quota-table tbody");
+      const baseBudget = availableBudget(BASE.quotas).instances;
+      tbody.innerHTML = SCENARIOS.map((s, i) => {
+        const q = scaleQuotas(s);
+        const b = availableBudget(q);
+        const vm = b.instances;
+        const rel = maxConcurrentRelwithdebinfo(b);
+        const delta = i === 0 ? "—" : fmtPct(vm, baseBudget);
+        const cls = i === 0 ? "highlight" : "";
+        return `<tr class="${cls}">
+          <td><strong>${s.name}</strong></td>
+          <td class="num">${fmt(q.instances)}</td>
+          <td class="num">${fmt(q.vcpu)}</td>
+          <td class="num">${fmt(q.ram_gb)}</td>
+          <td class="num">${fmt(q.nrd_ssd_gb)}</td>
+          <td class="num"><strong>${vm.toFixed(1)}</strong></td>
+          <td class="num ${vm > baseBudget ? "good" : ""}">${delta}</td>
+          <td class="num">${rel}</td>
+        </tr>`;
+      }).join("");
+    }
+
+    function renderBenefits() {
+      const baseQ = scaleQuotas(SCENARIOS[0]);
+      const baseB = availableBudget(baseQ);
+      const baseVm = baseB.instances;
+      const baseRel = maxConcurrentRelwithdebinfo(baseB);
+      const baseShard12 = maxHeavyShardJobs(baseB, 12);
+
+      const cards = [
+        {
+          title: "vcpu+10%",
+          points: (() => {
+            const q = scaleQuotas(SCENARIOS[1]);
+            const b = availableBudget(q);
+            return [
+              `+${fmtPct(b.vcpu, baseB.vcpu)} доступного vCPU — больше параллельных shard без роста instances`,
+              `VM budget без изменений (${b.instances.toFixed(1)}) — очередь по instances не снимается`,
+              `relwithdebinfo concurrent: ${baseRel} → ${maxConcurrentRelwithdebinfo(b)}`,
+              `Тяжёлые job (12 shard): ${baseShard12} → ${maxHeavyShardJobs(b, 12)} одновременно`,
+            ];
+          })(),
+        },
+        {
+          title: "all+25%",
+          points: (() => {
+            const q = scaleQuotas(SCENARIOS[2]);
+            const b = availableBudget(q);
+            return [
+              `VM budget ${baseVm.toFixed(1)} → ${b.instances.toFixed(1)} (${fmtPct(b.instances, baseVm)})`,
+              `Снимает очередь в пик: больше одновременных PR-check`,
+              `relwithdebinfo: ${baseRel} → ${maxConcurrentRelwithdebinfo(b)} (+${maxConcurrentRelwithdebinfo(b) - baseRel})`,
+              `12-shard jobs: ${baseShard12} → ${maxHeavyShardJobs(b, 12)}`,
+              `Балансный шаг: instances + vCPU + RAM + SSD`,
+            ];
+          })(),
+        },
+        {
+          title: "all x2",
+          points: (() => {
+            const q = scaleQuotas(SCENARIOS[3]);
+            const b = availableBudget(q);
+            return [
+              `VM budget ×2 (${b.instances.toFixed(1)}) — запас для rollout sharding на все eligible PR`,
+              `relwithdebinfo: ${maxConcurrentRelwithdebinfo(b)} одновременно`,
+              `12-shard: до ${maxHeavyShardJobs(b, 12)} тяжёлых PR параллельно`,
+              `Минимизирует trade-off «быстрый work vs длинный wait»`,
+              `Максимальный эффект на D ≥ 120 мин вне peak cap`,
+            ];
+          })(),
+        },
+        {
+          title: "Sharding без роста квот",
+          points: [
+            "Work падает на тяжёлых PR, но wait может вырасти",
+            "При budget ~74 VM: ~5 job с 12 shard одновременно (теор. макс.)",
+            "На peak shard cap = 4 → выигрыш work ограничен",
+            "Имеет смысл начать с main + stable/* rollout",
+          ],
+        },
+      ];
+
+      document.getElementById("benefit-cards").innerHTML = cards.map((c) => `
+        <div class="card">
+          <h3>${c.title}</h3>
+          <ul>${c.points.map((p) => `<li>${p}</li>`).join("")}</ul>
+        </div>
+      `).join("");
+    }
+
+    function renderTiers() {
+      const b = availableBudget(BASE.quotas);
+      document.getElementById("tier-table").innerHTML = TIERS.map((t) => {
+        const runners = t.shards + 1;
+        const peakNote = t.peak ? ` (peak: ${t.peak}+1)` : "";
+        const maxJobs = maxHeavyShardJobs(b, t.peak || t.shards);
+        const load = t.shards === 1 ? "низкая" : t.shards <= 4 ? "средняя" : "высокая";
+        return `<tr>
+          <td>${t.label}</td>
+          <td class="num">${t.shards}${t.peak ? ` <span class="muted">/ peak ${t.peak}</span>` : ""}</td>
+          <td class="num">${runners}${peakNote}</td>
+          <td>${load}; ~${maxJobs} job одновр. (current budget)</td>
+        </tr>`;
+      }).join("");
+    }
+
+    function updateInteractive() {
+      const mult = {
+        inst: parseFloat(document.getElementById("inst-mult").value),
+        vcpu: parseFloat(document.getElementById("vcpu-mult").value),
+        ram: parseFloat(document.getElementById("ram-mult").value),
+        ssd: parseFloat(document.getElementById("ssd-mult").value),
+      };
+      ["inst", "vcpu", "ram", "ssd"].forEach((k) => {
+        document.getElementById(k + "-val").textContent = mult[k === "inst" ? "inst" : k].toFixed(2);
+      });
+
+      const q = scaleQuotas(mult);
+      const b = availableBudget(q);
+      const baseB = availableBudget(BASE.quotas);
+      const rel = maxConcurrentRelwithdebinfo(b);
+      const shard4 = maxHeavyShardJobs(b, 4);
+      const shard12 = maxHeavyShardJobs(b, 12);
+
+      document.getElementById("live-stats").innerHTML = [
+        { label: "VM budget", value: b.instances.toFixed(1), pct: b.instances / baseB.instances },
+        { label: "vCPU avail.", value: fmt(Math.round(b.vcpu)), pct: b.vcpu / baseB.vcpu },
+        { label: "relwithdebinfo", value: String(rel), pct: rel / maxConcurrentRelwithdebinfo(baseB) },
+        { label: "4-shard jobs", value: String(shard4), pct: shard4 / Math.max(1, maxHeavyShardJobs(baseB, 4)) },
+        { label: "12-shard jobs", value: String(shard12), pct: shard12 / Math.max(1, maxHeavyShardJobs(baseB, 12)) },
+      ].map((s) => `
+        <div class="stat">
+          <div class="label">${s.label}</div>
+          <div class="value">${s.value}</div>
+          <div class="delta-bar"><span style="width:${Math.min(100, s.pct * 50)}%"></span></div>
+        </div>
+      `).join("");
+
+      let insight = "";
+      if (mult.inst === 1 && mult.vcpu > 1 && mult.ram === 1) {
+        insight = "Рост только vCPU: больше shard на job, но очередь по instances может остаться.";
+      } else if (mult.inst > 1) {
+        insight = `Рост instances: VM budget ${fmtPct(b.instances, baseB.instances)} — основной рычаг против wait p90.`;
+      } else if (Object.values(mult).every((v) => v < 1)) {
+        insight = "Сжатие квот: ожидайте рост wait и ограничение shard count через capacity_cap.";
+      } else {
+        insight = "Сбалансированное масштабирование снижает риск, что один ресурс (instances / vCPU / RAM) станет bottleneck.";
+      }
+      document.getElementById("interactive-insight").textContent = insight;
+    }
+
+    ["inst-mult", "vcpu-mult", "ram-mult", "ssd-mult"].forEach((id) => {
+      document.getElementById(id).addEventListener("input", updateInteractive);
+    });
+
+    renderQuotaTable();
+    renderBenefits();
+    renderTiers();
+    updateInteractive();
+  </script>
+</body>
+</html>
