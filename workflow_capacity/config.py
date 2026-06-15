@@ -126,6 +126,22 @@ class PoolConfig:
     def max_instances_budget(self) -> float:
         return self.available_budget()["instances"]
 
+    def concurrent_slots(self, preset_label: str) -> dict[str, int]:
+        """Max concurrent runners of preset_label if only one resource bound."""
+        budget = self.available_budget()
+        fp = self.footprint(preset_label)
+        return {
+            "instances": int(budget["instances"]),
+            "vcpu": int(budget["vcpu"] / max(fp.vcpu, 1)),
+            "ram_gb": int(budget["ram_gb"] / max(fp.ram_gb, 1)),
+            "nrd_ssd_gb": int(budget["nrd_ssd_gb"] / max(fp.nrd_ssd_gb, 1)),
+        }
+
+    def binding_for_preset(self, preset_label: str) -> tuple[str, dict[str, int]]:
+        slots = self.concurrent_slots(preset_label)
+        binding = min(slots, key=slots.get)
+        return binding, slots
+
     def with_quota_scale(
         self,
         *,

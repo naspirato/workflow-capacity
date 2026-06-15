@@ -10,12 +10,14 @@ import pandas as pd
 from workflow_capacity.config import PoolConfig
 from workflow_capacity.metrics import (
     ROLL_OUTS,
-    aggregate_p90,
+    agg_get,
+    aggregate_percentiles,
     comparison_table,
+    normalize_percentiles,
     scenario_metrics,
 )
 from workflow_capacity.pr_check import PrCheckRun, build_pr_check_runs
-from workflow_capacity.simulate import run_pair
+from workflow_capacity.simulate import ScenarioResult, run_pair, scale_pr_traffic
 
 
 @dataclass
@@ -28,6 +30,10 @@ class ConfigComparison:
     base_agg: dict
     par_agg: dict
     table: list[dict[str, Any]]
+    percentiles: list[float]
+    primary_percentile: float
+    baseline: ScenarioResult
+    parallel: ScenarioResult
 
 
 def evaluate_config(
@@ -39,16 +45,26 @@ def evaluate_config(
     rollout_label: str = "all eligible",
     shard_eligible: Callable[[PrCheckRun], bool] | None = None,
     peak_hours: list[int] | None = None,
-    pr_wall: bool = False,
+    pr_wall: bool = True,
+    percentiles: float | int | list[float] | None = None,
+    primary_percentile: float | None = None,
+    load_scale: float = 1.0,
 ) -> ConfigComparison:
-    baseline, parallel = run_pair(jobs, pr_runs, config, shard_eligible=shard_eligible)
-    base_rows, par_rows = scenario_metrics(
-        baseline, parallel, pr_runs, shard_eligible=shard_eligible, pr_wall=pr_wall
+    pcts = normalize_percentiles(percentiles)
+    primary = float(primary_percentile if primary_percentile is not None else pcts[-1])
+    sim_jobs, sim_runs = scale_pr_traffic(jobs, pr_runs, load_scale)
+    baseline, parallel = run_pair(
+        sim_jobs, sim_runs, config, shard_eligible=shard_eligible, load_scale=1.0
     )
-    base_agg = aggregate_p90(base_rows)
-    par_agg = aggregate_p90(par_rows)
+    base_rows, par_rows = scenario_metrics(
+        baseline, parallel, sim_runs, shard_eligible=shard_eligible, pr_wall=pr_wall
+    )
+    base_agg = aggregate_percentiles(base_rows, pcts)
+    par_agg = aggregate_percentiles(par_rows, pcts)
     hours = peak_hours if peak_hours is not None else list(range(24))
-    table = comparison_table(base_agg, par_agg, hours=hours)
+    table = comparison_table(
+        base_agg, par_agg, hours=hours, percentiles=pcts, primary_percentile=primary
+    )
     return ConfigComparison(
         config=config,
         rollout_key=rollout_key,
@@ -58,6 +74,10 @@ def evaluate_config(
         base_agg=base_agg,
         par_agg=par_agg,
         table=table,
+        percentiles=pcts,
+        primary_percentile=primary,
+        baseline=baseline,
+        parallel=parallel,
     )
 
 
@@ -67,6 +87,8 @@ def evaluate_matrix(
     *,
     classify: bool = True,
     peak_hours: list[int] | None = None,
+    percentiles: float | int | list[float] | None = None,
+    primary_percentile: float | None = None,
 ) -> list[ConfigComparison]:
     pr_runs = build_pr_check_runs(jobs, classify=classify)
     results: list[ConfigComparison] = []
@@ -81,6 +103,8 @@ def evaluate_matrix(
                     rollout_label=rollout_label,
                     shard_eligible=shard_eligible,
                     peak_hours=peak_hours,
+                    percentiles=percentiles,
+                    primary_percentile=primary_percentile,
                 )
             )
     return results
@@ -143,15 +167,17 @@ def sankey_compare_configs(
     *,
     hour: int | None = None,
     d_key: str = "all",
+    percentile: float | None = None,
 ) -> dict[str, Any]:
     """Sankey comparing total time split between two capacity configs (sharding path)."""
+    pct = float(percentile if percentile is not None else left.primary_percentile)
     key = (hour, d_key)
     lp = left.par_agg.get(key) or left.par_agg.get((None, d_key), {})
     rp = right.par_agg.get(key) or right.par_agg.get((None, d_key), {})
-    lw = lp.get("wait_p90") or 0.0
-    lr = lp.get("work_p90") or 0.0
-    rw = rp.get("wait_p90") or 0.0
-    rr = rp.get("work_p90") or 0.0
+    lw = agg_get(lp, "wait", pct) or 0.0
+    lr = agg_get(lp, "work", pct) or 0.0
+    rw = agg_get(rp, "wait", pct) or 0.0
+    rr = agg_get(rp, "work", pct) or 0.0
     return {
         "type": "sankey",
         "node": {
@@ -170,7 +196,8 @@ def sankey_compare_configs(
         "meta": {
             "right_wait": rw,
             "right_work": rr,
-            "right_total": (rp.get("total_p90") or 0.0),
-            "left_total": (lp.get("total_p90") or 0.0),
+            "right_total": agg_get(rp, "total", pct) or 0.0,
+            "left_total": agg_get(lp, "total", pct) or 0.0,
+            "percentile": pct,
         },
     }

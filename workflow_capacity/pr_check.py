@@ -1,20 +1,13 @@
-"""Model PR-check relwithdebinfo jobs under baseline vs pr_check_parallel."""
+"""Model PR-check jobs (relwithdebinfo + release-asan) under baseline vs sharding."""
 
 from __future__ import annotations
 
-import re
-import subprocess
-import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from workflow_capacity.sharding import choose_shard_count, is_peak_hour_utc  # noqa: E402
-
-HEAVY_PATH_RE = re.compile(
-    r"^(ydb/core/|ydb/library/|ydb/public/|ydb/services/|ydb/apps/|yql/|util/|"
-    r"library/|contrib/|build/|devtools/|ya\.make$|ydb/ya\.make$)"
-)
+from workflow_capacity.pr_classify import ClassifyRules, classify_pr_number
+from workflow_capacity.sharding import choose_shard_count, is_peak_hour_utc
 
 PREPARE_MIN_SEC = 15 * 60
 PREPARE_MAX_SEC = 25 * 60
@@ -36,35 +29,6 @@ class PrCheckRun:
 
 def parse_ts(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
-
-
-def classify_pr(pr_number: int, repo: str = "ydb-platform/ydb") -> str:
-    files: list[str] = []
-    for page in range(1, 11):
-        try:
-            out = subprocess.check_output(
-                [
-                    "gh",
-                    "api",
-                    f"repos/{repo}/pulls/{pr_number}/files?per_page=100&page={page}",
-                ],
-                stderr=subprocess.DEVNULL,
-                text=True,
-            )
-        except subprocess.CalledProcessError:
-            break
-        chunk = __import__("json").loads(out)
-        if not chunk:
-            break
-        files.extend(item["filename"] for item in chunk)
-        if len(chunk) < 100:
-            break
-    if len(files) >= 500:
-        return "sharded"
-    for path in files:
-        if HEAVY_PATH_RE.match(path):
-            return "sharded"
-    return "single"
 
 
 def estimate_prepare_sec(mono_duration_sec: float) -> float:
@@ -96,7 +60,7 @@ def sharded_rwdi_timeline(
     started_at: datetime,
     capacity_cap: int,
 ) -> tuple[float, int, float, float]:
-    """Return wall-clock, shard_count, prepare_sec, shard_sec."""
+    """Return wall-clock, shard_count, prepare_sec, shard_sec for a PR-check build job."""
     prepare_sec = estimate_prepare_sec(mono_duration_sec)
     test_sec = max(mono_duration_sec - prepare_sec, 60.0)
     shard_count, _ = estimate_shard_count(
@@ -109,11 +73,22 @@ def sharded_rwdi_timeline(
     return wall, shard_count, prepare_sec, shard_sec
 
 
+def parse_pr_shard_key(key: str) -> tuple[str, int] | None:
+    """Parse ``prepare:BRANCH:run_id`` or ``shards:BRANCH:run_id`` → (branch, run_id)."""
+    parts = key.split(":")
+    if len(parts) == 3 and parts[0] in ("prepare", "shards") and parts[1] in ("rwdi", "asan"):
+        return parts[1], int(parts[2])
+    return None
+
+
 def build_pr_check_runs(
     jobs: list[dict[str, Any]],
     *,
     classify: bool = True,
     repo: str = "ydb-platform/ydb",
+    pr_files: dict[str, Any] | None = None,
+    classify_rules: ClassifyRules | None = None,
+    fetch_if_missing: bool = False,
 ) -> list[PrCheckRun]:
     by_run: dict[int, dict[str, Any]] = {}
     for job in jobs:
@@ -126,8 +101,9 @@ def build_pr_check_runs(
         elif "release-asan" in name or "asan" in name:
             bucket["asan"] = job
 
-    runs: list[PrCheckRun] = []
+    rules = classify_rules or ClassifyRules.default()
     pr_mode_cache: dict[int, str] = {}
+    runs: list[PrCheckRun] = []
     for run_id, bucket in by_run.items():
         rwdi = bucket["rwdi"]
         if not rwdi:
@@ -137,13 +113,18 @@ def build_pr_check_runs(
         if pr_number:
             if pr_number not in pr_mode_cache:
                 if classify:
-                    pr_mode_cache[pr_number] = classify_pr(pr_number, repo)
-                    time.sleep(0.05)
+                    mode_val, _ = classify_pr_number(
+                        int(pr_number),
+                        repo=repo,
+                        pr_files=pr_files,
+                        rules=rules,
+                        fetch_if_missing=fetch_if_missing,
+                    )
+                    pr_mode_cache[int(pr_number)] = mode_val
                 else:
-                    pr_mode_cache[pr_number] = "sharded"
-            mode = pr_mode_cache[pr_number]
+                    pr_mode_cache[int(pr_number)] = "sharded"
+            mode = pr_mode_cache[int(pr_number)]
         elif classify:
-            # No PR metadata: cannot run path classifier; stay on monolith.
             mode = "single"
         else:
             mode = "sharded"

@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from workflow_capacity.log import status
+from workflow_capacity.pr_classify import fetch_pr_files_snapshot
 
 REPO = "ydb-platform/ydb"
 REPO_OWNER, REPO_NAME = REPO.split("/", 1)
@@ -333,10 +334,39 @@ def augment(path: Path, *, resolve_run_sha: bool) -> dict[str, int]:
         if changed:
             updated_jobs += 1
 
+    pr_files: dict[str, object] = dict(payload.get("pr_files") or {})
+    unique_prs: set[int] = set()
+    for job in jobs:
+        if job.get("workflow_name") != "PR-check":
+            continue
+        pn = job.get("pr_number")
+        if pn:
+            unique_prs.add(int(pn))
+    for meta in run_meta.values():
+        if meta.pr_number:
+            unique_prs.add(int(meta.pr_number))
+
+    if unique_prs:
+        status(f"augment: fetching changed files for {len(unique_prs)} PRs ...")
+    fetched = 0
+    for idx, pr_number in enumerate(sorted(unique_prs), 1):
+        key = str(pr_number)
+        if key in pr_files and "files" in pr_files[key]:
+            continue
+        snap = fetch_pr_files_snapshot(pr_number, repo=REPO)
+        pr_files[key] = snap.to_dict()
+        fetched += 1
+        time.sleep(0.05)
+        if idx % 50 == 0 or idx == len(unique_prs):
+            status(f"  pr_files: {idx}/{len(unique_prs)} PRs ({fetched} fetched this run) ...")
+    payload["pr_files"] = pr_files
+
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     stats = {
         "pr_check_runs": len(run_info),
         "prs_cached": len(pr_cache),
+        "prs_with_files": len(pr_files),
+        "pr_files_fetched": fetched,
         "heads_cached": len(head_cache),
         "shas_cached": len(sha_cache),
         "jobs_updated": updated_jobs,

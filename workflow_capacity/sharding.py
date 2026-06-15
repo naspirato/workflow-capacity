@@ -5,7 +5,7 @@ from __future__ import annotations
 DEFAULT_THREADS = 52
 DEFAULT_LIGHT_THRESHOLD_MIN = 60.0
 DEFAULT_TIERS = ((120.0, 4), (200.0, 8), (float("inf"), 12))
-DEFAULT_PEAK_HOURS_UTC = range(9, 17)
+DEFAULT_PEAK_HOURS_UTC = range(8, 19)
 DEFAULT_PEAK_CAP = 4
 
 

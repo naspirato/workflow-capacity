@@ -5,28 +5,39 @@ quotas:
   ram_gb: 23000
   nrd_ssd_gb: 200000
 
-# Legacy aggregate reserve (used if static_runners do not cover everything).
+# Misc permanent VMs in the folder (dev boxes, etc.) — not autoscale ghrun-*.
 reserved:
-  vcpu: 200
-  ram_gb: 600
-  instances: 22
-  nrd_ssd_gb: 16000
+  vcpu: 120
+  ram_gb: 400
+  instances: 13
+  nrd_ssd_gb: 8000
 
-# Always-on VMs outside auto-provisioned runner pool.
-# Add new runner types here (tiny workers, analytics caches, etc.).
+# Always-on VMs outside autoscale runner pool (see Yandex Compute Cloud export).
 static_runners:
   tiny-worker:
-    count: 4
+    count: 6
     footprint:
       vcpu: 4
-      ram_gb: 16
+      ram_gb: 8
       nrd_ssd_gb: 200
-  analytics-cache:
-    count: 2
+  cachesrv:
+    count: 1
     footprint:
       vcpu: 32
-      ram_gb: 128
-      nrd_ssd_gb: 2000
+      ram_gb: 96
+      nrd_ssd_gb: 4500
+  gh-runners-controller:
+    count: 1
+    footprint:
+      vcpu: 2
+      ram_gb: 2
+      nrd_ssd_gb: 10
+  gh-runners-gw:
+    count: 1
+    footprint:
+      vcpu: 2
+      ram_gb: 1
+      nrd_ssd_gb: 10
 
 headroom_fraction: 0.9
 saturated_min_shards: 2
@@ -56,6 +67,25 @@ footprints:
     vcpu: 64
     ram_gb: 320
     nrd_ssd_gb: 2417
+
+# PR sharding classifier (rules applied at simulation time; raw paths cached in jobs_*.json).
+pr_classify:
+  file_count_threshold: 500
+  heavy_path_prefixes:
+    - ydb/core/
+    - ydb/library/
+    - ydb/public/
+    - ydb/services/
+    - ydb/apps/
+    - yql/
+    - util/
+    - library/
+    - contrib/
+    - build/
+    - devtools/
+  heavy_path_exact:
+    - ya.make
+    - ydb/ya.make
 
 default_footprint:
   vcpu: 96

@@ -23,6 +23,7 @@ class JobsDataset:
     until: str
     jobs: list[dict[str, Any]]
     stats: dict[str, Any]
+    pr_files: dict[str, Any]
 
     @classmethod
     def load(cls, path: Path) -> JobsDataset:
@@ -34,6 +35,7 @@ class JobsDataset:
             until=payload.get("until", payload.get("since", "")),
             jobs=payload["jobs"],
             stats=payload.get("stats", {}),
+            pr_files=payload.get("pr_files") or {},
         )
 
 
@@ -52,6 +54,8 @@ def list_datasets(cache_dir: Path = DEFAULT_CACHE_DIR) -> list[JobsDataset]:
         return []
     out: list[JobsDataset] = []
     for path in sorted(cache_dir.glob("jobs_*.json")):
+        if path.name.endswith(".partial.json"):
+            continue
         try:
             out.append(JobsDataset.load(path))
         except (json.JSONDecodeError, KeyError):
@@ -61,6 +65,69 @@ def list_datasets(cache_dir: Path = DEFAULT_CACHE_DIR) -> list[JobsDataset]:
 
 def load_dataset(path: Path | str) -> JobsDataset:
     return JobsDataset.load(Path(path))
+
+
+def resolve_dataset(
+    *,
+    days: int = 14,
+    repo: str = "ydb-platform/ydb",
+    cache_dir: Path = DEFAULT_CACHE_DIR,
+    refresh: bool = False,
+    selected: Path | str | None = None,
+    augment: bool = True,
+) -> JobsDataset:
+    """Pick dataset: explicit path → matching window → latest cache → download."""
+    if selected is not None:
+        status(f"cache: loading selected {Path(selected).name}")
+        return load_dataset(selected)
+
+    until = datetime.now(timezone.utc)
+    since = until - timedelta(days=days)
+    path = cache_path(cache_dir, repo, since, until)
+
+    if path.exists() and not refresh:
+        try:
+            dataset = JobsDataset.load(path)
+            status(
+                f"cache: loaded {path.name} "
+                f"({len(dataset.jobs)} jobs, {dataset.since[:10]} .. {dataset.until[:10]})"
+            )
+            return dataset
+        except (json.JSONDecodeError, KeyError):
+            status(f"cache: corrupt file {path.name}, re-collecting ...")
+            path.unlink(missing_ok=True)
+
+    cached = list_datasets(cache_dir)
+    if cached and not refresh:
+        dataset = cached[-1]
+        status(
+            f"cache: {days}d window not found, using latest {dataset.path.name} "
+            f"({len(dataset.jobs)} jobs)"
+        )
+        return dataset
+
+    if not refresh:
+        partials = sorted(cache_dir.glob("jobs_*.partial.json"))
+        if partials:
+            path = partials[-1]
+            status(
+                f"cache: WARNING — only incomplete {path.name} "
+                f"(finish collect or set REFRESH=True for full window)"
+            )
+            return load_dataset(path)
+
+    if cached and refresh:
+        status("cache: refresh=True — re-downloading from GitHub")
+    else:
+        status(f"cache: empty — downloading {days}d window from GitHub ...")
+
+    return ensure_dataset(
+        days=days,
+        repo=repo,
+        cache_dir=cache_dir,
+        refresh=True,
+        augment=augment,
+    )
 
 
 def ensure_dataset(
@@ -103,6 +170,7 @@ def ensure_dataset(
         until=payload["until"],
         jobs=payload["jobs"],
         stats=payload.get("stats", {}),
+        pr_files=payload.get("pr_files") or {},
     )
     if augment:
         from workflow_capacity.augment import augment_file

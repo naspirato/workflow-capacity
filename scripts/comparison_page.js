@@ -1,0 +1,1155 @@
+    let DATA = null;
+    let BASE = null;
+    let BASE_POINT = null;
+    let scaleIdx = 0;
+    let loadIdx = 0;
+    let ACTIVE_PCT = 90;
+    let AVAILABLE_PCTS = [90];
+
+    const QUOTA_KEYS = ["instances", "vcpu", "ram_gb", "nrd_ssd_gb"];
+    const QUOTA_LABELS = {
+      instances: "Instances",
+      vcpu: "vCPU",
+      ram_gb: "RAM, GB",
+      nrd_ssd_gb: "SSD, GB",
+    };
+    const BINDING_LABELS = {
+      instances: "instances",
+      vcpu: "vCPU",
+      ram_gb: "RAM",
+      nrd_ssd_gb: "SSD",
+    };
+    const D_GROUP_ORDER = ["D < 60", "60 ≤ D < 120", "120 ≤ D < 200", "D ≥ 200"];
+    const HOUR_TOTAL_LABEL = "Total";
+    let showPeakHoursOnly = true;
+    let selectedChartHour = null;
+    let lastChartPoint = null;
+    let runnerDeltaIdx = 0;
+
+    const CHART_W = 440;
+    const CHART_H = 234;
+    const DURATION_CHART_H = Math.round(180 * 1.3);
+    const Y_GRID_STEP_MIN = 50;
+
+    function niceYMaxMinutes(rawMax, step = Y_GRID_STEP_MIN) {
+      const padded = Math.max(step, rawMax * 1.05);
+      return Math.ceil(padded / step) * step;
+    }
+
+    function buildMinuteGrid(yMax, pad, W, ih) {
+      const lines = [];
+      for (let v = 0; v <= yMax; v += Y_GRID_STEP_MIN) {
+        const y = pad.t + ih * (1 - v / yMax);
+        lines.push(
+          `<line x1="${pad.l}" y1="${y}" x2="${W - pad.r}" y2="${y}" stroke="#2a3548" stroke-width="1"/>`
+          + `<text x="${pad.l - 4}" y="${y + 3}" fill="#8b9bb4" font-size="9" text-anchor="end">${v}</text>`
+        );
+      }
+      return lines.join("");
+    }
+
+    function fmt(v) { return v == null ? "—" : v.toFixed(1); }
+    function pct(cur, base) {
+      if (base == null || cur == null || base === 0) return "—";
+      const p = 100 * (cur - base) / base;
+      return (p > 0 ? "+" : "") + p.toFixed(1) + "%";
+    }
+    function clsDelta(v, invert) {
+      if (v == null || Math.abs(v) < 0.05) return "";
+      const good = invert ? v < 0 : v > 0;
+      return good ? "good" : "bad";
+    }
+    function pctSuffix(p) {
+      return p === Math.floor(p) ? `p${p}` : `p${String(p).replace(".", "_")}`;
+    }
+    function pctLabel(p) {
+      return p === Math.floor(p) ? `p${p}` : `p${p}`;
+    }
+    function metric(o, side, kind, p = ACTIVE_PCT) {
+      if (!o) return null;
+      const pl = pctSuffix(p);
+      return o[`${side}_${kind}_${pl}`] ?? (p === 90 ? o[`${side}_${kind}_p90`] : null);
+    }
+
+    function scaleLabel(scale) {
+      const pct = Math.round(scale * 100);
+      return scale === 1 ? "current (100%)" : `${pct}%`;
+    }
+
+    function loadLabel(load) {
+      const pct = Math.round(load * 100);
+      if (Math.abs(load - 1) < 0.001) return "факт (100%)";
+      const delta = pct - 100;
+      const rel = (delta > 0 ? "+" : "") + delta + "%";
+      return `${pct}% (${rel})`;
+    }
+
+    function defaultScaleIdx() {
+      const i = (DATA.scale_sweeps || []).findIndex((s) => Math.abs(s - 1) < 0.001);
+      return i >= 0 ? i : 0;
+    }
+
+    function defaultLoadIdx() {
+      const i = (DATA.load_sweeps || []).findIndex((l) => Math.abs(l - 1) < 0.001);
+      return i >= 0 ? i : 0;
+    }
+
+    function pointAtIndices(qIdx, lIdx) {
+      const scale = DATA.scale_sweeps[qIdx];
+      const load = (DATA.load_sweeps || [1])[lIdx ?? 0];
+      return DATA.interactive.find(
+        (p) => Math.abs(p.scale - scale) < 0.001 && Math.abs((p.load ?? 1) - load) < 0.001
+      ) ?? DATA.interactive[0];
+    }
+
+    function pointAtScaleIdx(idx) {
+      return pointAtIndices(idx, loadIdx);
+    }
+
+    function hourRows(point) {
+      return (point?.by_hour || []).slice().sort((a, b) => a.hour_utc.localeCompare(b.hour_utc));
+    }
+
+    function prCountRows(point) {
+      if (point?.pr_count_by_hour?.length) {
+        return point.pr_count_by_hour.slice().sort((a, b) => a.hour_utc.localeCompare(b.hour_utc));
+      }
+      return hourRows(point).map((r) => ({ hour_utc: r.hour_utc, mono_n: r.n ?? 0, shard_n: r.n ?? 0 }));
+    }
+
+    function countForRow(r, side) {
+      return side === "mono" ? (r.mono_n ?? 0) : (r.shard_n ?? 0);
+    }
+
+    function sharedCountYMax(rows, baseRows) {
+      let max = 1;
+      const scan = (list) => {
+        for (const r of list || []) {
+          max = Math.max(max, countForRow(r, "mono"), countForRow(r, "shard"));
+        }
+      };
+      scan(rows);
+      scan(baseRows);
+      return Math.ceil(max * 1.08);
+    }
+
+    function renderCountChartSvg(rows, baseRows, side, color, yMax) {
+      const W = 440, H = 180;
+      const pad = { l: 36, r: 10, t: 20, b: 24 };
+      const iw = W - pad.l - pad.r;
+      const ih = H - pad.t - pad.b;
+      const n = rows.length;
+      if (!n) {
+        return `<text x="${W / 2}" y="${H / 2}" fill="#8b9bb4" text-anchor="middle" font-size="12">нет данных</text>`;
+      }
+      if (yMax == null) yMax = sharedCountYMax(rows, baseRows);
+      const sx = (i) => pad.l + (n <= 1 ? iw / 2 : (i / (n - 1)) * iw);
+      const sy = (v) => pad.t + ih - (v / yMax) * ih;
+      const barW = n > 16 ? Math.max(4, iw / n * 0.55) : Math.max(6, iw / n * 0.65);
+
+      const grid = [0, 0.5, 1].map((f) => {
+        const y = pad.t + ih * (1 - f);
+        const val = Math.round(yMax * f);
+        return `<line x1="${pad.l}" y1="${y}" x2="${W - pad.r}" y2="${y}" stroke="#2a3548" stroke-width="1"/>
+          <text x="${pad.l - 4}" y="${y + 3}" fill="#8b9bb4" font-size="9" text-anchor="end">${val}</text>`;
+      }).join("");
+
+      let baselineLine = "";
+      if (baseRows && baseRows.length === n) {
+        const parts = [];
+        baseRows.forEach((r, i) => {
+          const v = countForRow(r, side);
+          parts.push(`${parts.length ? "L" : "M"}${sx(i)},${sy(v)}`);
+        });
+        if (parts.length > 1) {
+          baselineLine = `<path d="${parts.join(" ")}" fill="none" stroke="#8b9bb4" stroke-width="1.5" stroke-dasharray="4 3" opacity="0.75"/>`;
+        }
+      }
+
+      const bars = rows.map((r, i) => {
+        const v = countForRow(r, side);
+        const x = sx(i) - barW / 2;
+        const y = sy(v);
+        const h = pad.t + ih - y;
+        return `<rect x="${x}" y="${y}" width="${barW}" height="${Math.max(0, h)}" rx="1.5" fill="${color}" fill-opacity="0.72"/>`;
+      }).join("");
+
+      const labelStep = n > 16 ? 2 : 1;
+      const labels = rows.map((r, i) => {
+        if (i % labelStep !== 0) return "";
+        const hh = r.hour_utc.slice(0, 2);
+        return `<text x="${sx(i)}" y="${H - 6}" fill="#8b9bb4" font-size="8" text-anchor="middle">${hh}</text>`;
+      }).join("");
+
+      const legend = `<text x="${pad.l}" y="${12}" fill="#8b9bb4" font-size="8">столбцы — run'ов/час · --- current</text>`;
+      return `${grid}${baselineLine}${bars}${labels}${legend}`;
+    }
+
+    function renderPrCountCharts(point) {
+      const rows = prCountRows(point);
+      const same = point.name === BASE_POINT.name;
+      const baseRows = same ? null : prCountRows(BASE_POINT);
+      const yMax = sharedCountYMax(rows, baseRows);
+      const yTop = Math.round(yMax / 1.08);
+      const total = rows.reduce((s, r) => s + countForRow(r, "mono"), 0);
+      const hint = document.getElementById("chart-count-hint");
+      if (hint) {
+        hint.textContent = same
+          ? `PR-check run'ов по часу старта (UTC, будни): всего ${total}. Шкала 0–${yTop}.`
+          : `«${point.name}»: ${total} run'ов. Пунктир — current (${prCountRows(BASE_POINT).reduce((s, r) => s + countForRow(r, "mono"), 0)}). Шкала 0–${yTop}.`;
+      }
+      const monoTitle = document.getElementById("chart-count-title-mono");
+      const shardTitle = document.getElementById("chart-count-title-shard");
+      if (monoTitle) monoTitle.textContent = `Монолит · PR run'ов/час · 0–${yTop}`;
+      if (shardTitle) shardTitle.textContent = `Sharding · PR run'ов/час · 0–${yTop}`;
+      document.getElementById("chart-count-mono").innerHTML = renderCountChartSvg(rows, baseRows, "mono", "#6ea8ff", yMax);
+      document.getElementById("chart-count-shard").innerHTML = renderCountChartSvg(rows, baseRows, "shard", "#3ecf8e", yMax);
+    }
+
+    function yMaxFor(rows, side) {
+      let max = 1;
+      for (const r of rows) {
+        for (const p of AVAILABLE_PCTS) {
+          const t = metric(r, side, "total", p);
+          if (t != null) max = Math.max(max, t);
+        }
+      }
+      return max * 1.08;
+    }
+
+    function sharedChartYMax(rows, baseRows) {
+      let max = 1;
+      const scan = (list) => {
+        for (const r of list || []) {
+          for (const side of ["mono", "shard"]) {
+            for (const p of AVAILABLE_PCTS) {
+              const t = metric(r, side, "total", p);
+              if (t != null) max = Math.max(max, t);
+            }
+          }
+        }
+      };
+      scan(rows);
+      scan(baseRows);
+      return niceYMaxMinutes(max);
+    }
+
+    function renderHourlyChartSvg(rows, baseRows, side, colors, yMax, selectedHour) {
+      const W = CHART_W, H = DURATION_CHART_H;
+      const pad = { l: 36, r: 10, t: 20, b: 24 };
+      const iw = W - pad.l - pad.r;
+      const ih = H - pad.t - pad.b;
+      const merged = rows.concat(baseRows || []);
+      if (yMax == null) {
+        yMax = yMaxFor(merged.length ? merged : rows, side);
+      }
+      const n = rows.length;
+      if (!n) {
+        return `<text x="${W / 2}" y="${H / 2}" fill="#8b9bb4" text-anchor="middle" font-size="12">нет данных</text>`;
+      }
+      const sx = (i) => pad.l + (n <= 1 ? iw / 2 : (i / (n - 1)) * iw);
+      const sy = (v) => pad.t + ih - (v / yMax) * ih;
+      const pLo = AVAILABLE_PCTS[0];
+      const pHi = AVAILABLE_PCTS.at(-1);
+
+      const grid = buildMinuteGrid(yMax, pad, W, ih);
+
+      const hitW = n > 1 ? Math.max(8, iw / (n - 1) * 0.85) : iw;
+      const hits = rows.map((r, i) => {
+        const x = sx(i);
+        const sel = selectedHour === r.hour_utc;
+        return `
+          <rect class="chart-hour-hit" data-hour="${r.hour_utc}" x="${x - hitW / 2}" y="${pad.t}" width="${hitW}" height="${ih}" fill="${sel ? "rgba(79,140,255,0.14)" : "transparent"}" stroke="${sel ? "#4f8cff" : "none"}" stroke-width="1"/>
+        `;
+      }).join("");
+
+      const buildStack = (kind) => {
+        const pts = rows.map((r, i) => {
+          const w = metric(r, side, "wait") || 0;
+          const k = metric(r, side, "work") || 0;
+          const v = kind === "wait" ? w : w + k;
+          const base = kind === "wait" ? 0 : w;
+          return { x: sx(i), yTop: sy(v), yBase: sy(base) };
+        });
+        const top = pts.map((p, i) => `${i ? "L" : "M"}${p.x},${p.yTop}`).join(" ");
+        const bot = pts.slice().reverse().map((p) => `L${p.x},${p.yBase}`).join(" ");
+        return `<path d="${top} ${bot} Z" fill="${kind === "wait" ? colors.wait : colors.work}" fill-opacity="0.55"/>`;
+      };
+
+      let baselineLine = "";
+      if (baseRows && baseRows.length === n) {
+        const parts = [];
+        baseRows.forEach((r, i) => {
+          const t = metric(r, side, "total");
+          if (t == null) return;
+          parts.push(`${parts.length ? "L" : "M"}${sx(i)},${sy(t)}`);
+        });
+        if (parts.length > 1) {
+          baselineLine = `<path d="${parts.join(" ")}" fill="none" stroke="#8b9bb4" stroke-width="1.5" stroke-dasharray="4 3" opacity="0.75"/>`;
+        }
+      }
+
+      const whiskers = rows.map((r, i) => {
+        const lo = metric(r, side, "total", pLo);
+        const hi = metric(r, side, "total", pHi);
+        const mid = metric(r, side, "total");
+        const x = sx(i);
+        const w = n > 16 ? 8 : 12;
+        if (lo == null || hi == null || mid == null) return "";
+        const h = Math.max(1, sy(lo) - sy(hi));
+        return `
+          <rect x="${x - w / 2}" y="${sy(hi)}" width="${w}" height="${h}" rx="2" fill="${colors.band}"/>
+          <line x1="${x - w}" y1="${sy(lo)}" x2="${x + w}" y2="${sy(lo)}" stroke="${colors.line}" stroke-width="1" stroke-opacity="0.45"/>
+          <line x1="${x - w}" y1="${sy(hi)}" x2="${x + w}" y2="${sy(hi)}" stroke="${colors.line}" stroke-width="1" stroke-opacity="0.45"/>
+          <circle cx="${x}" cy="${sy(mid)}" r="${n > 16 ? 3 : 4}" fill="${colors.line}"/>
+        `;
+      }).join("");
+
+      const labelStep = n > 16 ? 2 : 1;
+      const labels = rows.map((r, i) => {
+        if (i % labelStep !== 0) return "";
+        const hh = r.hour_utc.slice(0, 2);
+        const sparse = (r.n_days ?? 0) > 0 && (r.n_days < 3 || (r.n ?? 0) < 5);
+        if (sparse) {
+          return `<text x="${sx(i)}" y="${H - 14}" fill="#f0b429" font-size="7" text-anchor="middle">${hh}</text>
+            <text x="${sx(i)}" y="${H - 5}" fill="#f0b429" font-size="6" text-anchor="middle">${r.n}n/${r.n_days}d</text>`;
+        }
+        return `<text x="${sx(i)}" y="${H - 6}" fill="#8b9bb4" font-size="8" text-anchor="middle">${hh}</text>`;
+      }).join("");
+
+      const legend = `<text x="${pad.l}" y="${12}" fill="#8b9bb4" font-size="8">● ${pctLabel(ACTIVE_PCT)} · ▭ ${pctLabel(pLo)}–${pctLabel(pHi)} · --- current · клик по часу</text>`;
+
+      return `${grid}${baselineLine}${buildStack("wait")}${buildStack("work")}${whiskers}${labels}${hits}${legend}`;
+    }
+
+    function updateChartHourDetail(rows, hour) {
+      const el = document.getElementById("chart-detail-hint");
+      if (!el) return;
+      if (!hour) {
+        el.textContent = "";
+        return;
+      }
+      const r = rows.find((x) => x.hour_utc === hour);
+      if (!r) {
+        el.textContent = "";
+        return;
+      }
+      const pl = pctLabel(ACTIVE_PCT);
+      el.innerHTML = `<strong>${hour} UTC</strong> · n=${r.n ?? "—"} · `
+        + `монолит: total ${fmt(metric(r, "mono", "total"))} (wait ${fmt(metric(r, "mono", "wait"))}, work ${fmt(metric(r, "mono", "work"))}) · `
+        + `sharding: total ${fmt(metric(r, "shard", "total"))} (wait ${fmt(metric(r, "shard", "wait"))}, work ${fmt(metric(r, "shard", "work"))}) · ${pl}`;
+    }
+
+    function highlightHourDGroupRow(hour) {
+      document.querySelectorAll("#hour-dgroup-table tbody tr").forEach((tr) => {
+        tr.classList.toggle("row-chart-selected", Boolean(hour && tr.dataset.hour === hour));
+      });
+      if (hour) {
+        document.querySelector(`#hour-dgroup-table tbody tr[data-hour="${hour}"]`)
+          ?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      }
+    }
+
+    function bindDurationChartClicks(svgId, rows) {
+      const svg = document.getElementById(svgId);
+      if (!svg) return;
+      svg.querySelectorAll(".chart-hour-hit").forEach((el) => {
+        el.addEventListener("click", () => {
+          const hour = el.getAttribute("data-hour");
+          selectedChartHour = selectedChartHour === hour ? null : hour;
+          if (lastChartPoint) renderHourlyCharts(lastChartPoint);
+        });
+      });
+    }
+
+    function bindDurationCharts(rows) {
+      bindDurationChartClicks("chart-mono", rows);
+      bindDurationChartClicks("chart-shard", rows);
+    }
+
+    function renderChartLegendHint() {
+      const el = document.getElementById("chart-legend-hint");
+      if (!el) return;
+      const pLo = AVAILABLE_PCTS[0];
+      const pHi = AVAILABLE_PCTS.at(-1);
+      el.innerHTML = `
+        <span class="swatch sw-wait"></span> ожидание в очереди
+        · <span class="swatch sw-mono"></span> выполнение (монолит)
+        · <span class="swatch sw-shard"></span> выполнение (sharding)
+        · ● ${pctLabel(ACTIVE_PCT)} total
+        · ▭ ${pctLabel(pLo)}–${pctLabel(pHi)}
+        · <span class="warn">жёлтая подпись часа</span> — мало run'ов или дней в bucket`;
+    }
+
+    function renderHourlyCharts(point) {
+      lastChartPoint = point;
+      const rows = hourRows(point);
+      const same = point.name === BASE_POINT.name;
+      const baseRows = same ? null : hourRows(BASE_POINT);
+      const yMax = sharedChartYMax(rows, baseRows);
+      const yTop = yMax;
+      document.getElementById("play-hint").textContent = same
+        ? `PR-check run'ы по часу старта (UTC, будни). Шкала 0–${yTop} мин, сетка каждые ${Y_GRID_STEP_MIN} мин. Клик по часу — детали и подсветка в таблице.`
+        : `Предрасчёт «${point.name}». Пунктир — current. Шкала 0–${yTop} мин, сетка ${Y_GRID_STEP_MIN} мин.`;
+      renderChartLegendHint();
+      const monoTitle = document.getElementById("chart-title-mono");
+      const shardTitle = document.getElementById("chart-title-shard");
+      if (monoTitle) monoTitle.textContent = `Монолит · 00–23 UTC · 0–${yTop} мин`;
+      if (shardTitle) shardTitle.textContent = `Sharding · 00–23 UTC · 0–${yTop} мин`;
+      document.getElementById("chart-mono").innerHTML = renderHourlyChartSvg(rows, baseRows, "mono", {
+        line: "#6ea8ff", band: "rgba(110,168,255,0.22)", wait: "rgba(240,113,120,0.55)", work: "rgba(79,140,255,0.5)",
+      }, yMax, selectedChartHour);
+      document.getElementById("chart-shard").innerHTML = renderHourlyChartSvg(rows, baseRows, "shard", {
+        line: "#3ecf8e", band: "rgba(62,207,142,0.22)", wait: "rgba(240,113,120,0.55)", work: "rgba(62,207,142,0.5)",
+      }, yMax, selectedChartHour);
+      bindDurationCharts(rows);
+      updateChartHourDetail(rows, selectedChartHour);
+      highlightHourDGroupRow(selectedChartHour);
+      renderPrCountCharts(point);
+    }
+
+    function updatePctHint() {
+      const peak = DATA?.meta?.peak_hours;
+      const peakStr = peak?.length ? `${String(peak[0]).padStart(2, "0")}–${String(peak.at(-1)).padStart(2, "0")}` : "08–18";
+      document.getElementById("tables-hint").innerHTML =
+        `${pctLabel(ACTIVE_PCT)} в пик ${peakStr} UTC. PR-check = <code>max(relwithdebinfo, release-asan)</code>; в шардинге оба job через prepare + shards.`
+        + ` Сценарии: одна строка = одни квоты; «Sharding vs mono@current» — total sharding относительно монолита при <code>current</code>.`;
+    }
+
+    function maxPrCheck(cap) {
+      return cap?.max_pr_check ?? cap?.max_rwdi;
+    }
+
+    function prCheckAnalysis(plan) {
+      const b = plan?.bottleneck;
+      return b?.pr_check || b?.rwdi;
+    }
+
+    function renderCapacityLine(cap) {
+      const el = document.getElementById("capacity-line");
+      if (!el || !cap) { if (el) el.textContent = ""; return; }
+      const binding = cap.binding_label || BINDING_LABELS[cap.binding] || cap.binding;
+      const n = maxPrCheck(cap);
+      const instSat = cap.instances_saturated_mono || cap.instances_saturated_shard;
+      const instNote = instSat
+        ? `<span class="warn">instances лимитирует</span> (budget ${fmt(cap.vm_budget)} ≤ peak ${cap.peak_mono}/${cap.peak_shard})`
+        : `instances не лимитирует (budget ${fmt(cap.vm_budget)} &gt; peak mono/shard ${cap.peak_mono}/${cap.peak_shard})`;
+      el.innerHTML = `PR-check (relwithdebinfo + asan): лимит <strong>${binding}</strong>, до <strong>${n}</strong> run'ов одновременно. ${instNote}`;
+    }
+
+    function renderQuotaGrid(quotas) {
+      const el = document.getElementById("quota-grid");
+      if (!el || !quotas) return;
+      el.innerHTML = QUOTA_KEYS.map((k) =>
+        `<span>${QUOTA_LABELS[k]}: <strong>${quotas[k]?.toLocaleString("ru-RU")}</strong> <span class="num" style="color:var(--muted)">(${pct(quotas[k], BASE[k])})</span></span>`
+      ).join("");
+    }
+
+    function renderConclusion() {
+      const cur = DATA.scenarios.find((s) => s.name === "current");
+      const o = cur?.overall;
+      if (!o) return;
+      const cap = cur?.capacity;
+      const monoTotal = metric(o, "mono", "total");
+      const shardTotal = metric(o, "shard", "total");
+      const ratio = (monoTotal / shardTotal).toFixed(1);
+      const all25 = DATA.scenarios.find((s) => s.name === "all+25%")?.overall;
+      const allMinus10 = DATA.scenarios.find((s) => s.name === "all-10%")?.overall;
+      const allMinus20 = DATA.scenarios.find((s) => s.name === "all-20%")?.overall;
+
+      const pl = pctSuffix(ACTIVE_PCT);
+      const deltaWait = o[`delta_wait_${pl}`] ?? o.delta_wait;
+      const deltaWork = o[`delta_work_${pl}`] ?? o.delta_work;
+
+      const monoWait = metric(o, "mono", "wait");
+      const monoWait25 = all25 ? metric(all25, "mono", "wait") : null;
+      const monoWaitMinus10 = allMinus10 ? metric(allMinus10, "mono", "wait") : null;
+      const monoWaitMinus20 = allMinus20 ? metric(allMinus20, "mono", "wait") : null;
+      const shardWait = metric(o, "shard", "wait");
+      const shardWait25 = all25 ? metric(all25, "shard", "wait") : null;
+
+      const bindingNote = cap
+        ? ` Сейчас лимитирует <strong>${cap.binding_label || BINDING_LABELS[cap.binding]}</strong> (~${maxPrCheck(cap)} PR-check одновременно, rwdi+asan).`
+        : "";
+
+      document.getElementById("conclusion").innerHTML = `
+        <p><strong>Внедрить sharding сейчас (текущие квоты):</strong>
+        PR-check ~<strong>${ratio}× быстрее</strong> — total ${pctLabel(ACTIVE_PCT)} ${fmt(monoTotal)} → ${fmt(shardTotal)} мин (${pct(shardTotal, monoTotal)}).
+        Ожидание +${fmt(deltaWait)} мин, выполнение ${fmt(deltaWork)} мин.</p>
+        <p><strong>Монолит и квоты:</strong> монолит использует тот же пул.${bindingNote}
+        all−20%: wait ${fmt(monoWait)} → ${fmt(monoWaitMinus20)} мин;
+        all−10%: ${fmt(monoWait)} → ${fmt(monoWaitMinus10)} мин;
+        all+25%: ${fmt(monoWait)} → ${fmt(monoWait25)} (монолит), ${fmt(shardWait)} → ${fmt(shardWait25)} (sharding).</p>
+        <p><strong>Масштабирование:</strong> квоты меняются вместе (instances + vCPU + RAM + SSD). Одна ось без остальных — некорректная модель «+10% мощности».</p>
+      `;
+    }
+
+    function scenarioRowHtml(s, curMonoTotal) {
+      const o = s.overall;
+      if (!o) return "";
+      const cap = s.capacity || {};
+      const monoTotal = metric(o, "mono", "total");
+      const shardTotal = metric(o, "shard", "total");
+      const monoWait = metric(o, "mono", "wait");
+      const shardWait = metric(o, "shard", "wait");
+      const monoWork = metric(o, "mono", "work");
+      const shardWork = metric(o, "shard", "work");
+      const deltaTotal = (shardTotal ?? 0) - (monoTotal ?? 0);
+      const vsCurMono = pct(shardTotal, curMonoTotal);
+      const binding = cap.binding_label
+        ? `${cap.binding_label} (~${maxPrCheck(cap)} PR-check)`
+        : "—";
+      return `
+        <tr>
+          <td><strong>${s.name ?? "—"}</strong></td>
+          <td class="num">${fmt(s.vm_budget)}</td>
+          <td style="font-size:0.82rem;color:var(--muted)">${binding}</td>
+          <td class="num col-mono">${fmt(monoTotal)}</td>
+          <td class="num col-mono">${fmt(monoWait)}</td>
+          <td class="num col-mono">${fmt(monoWork)}</td>
+          <td class="num col-shard">${fmt(shardTotal)}</td>
+          <td class="num col-shard">${fmt(shardWait)}</td>
+          <td class="num col-shard">${fmt(shardWork)}</td>
+          <td class="num ${clsDelta(deltaTotal, true)}">${fmt(deltaTotal)} (${pct(shardTotal, monoTotal)})</td>
+          <td class="num ${String(vsCurMono).startsWith("-") ? "good" : ""}">${vsCurMono}</td>
+        </tr>`;
+    }
+
+    function renderScenarioTable() {
+      const cur = DATA.scenarios.find((s) => s.name === "current");
+      const curMonoTotal = metric(cur?.overall, "mono", "total");
+      const tbody = document.querySelector("#scenario-table tbody");
+      tbody.innerHTML = DATA.scenarios.map((s) => scenarioRowHtml(s, curMonoTotal)).join("");
+    }
+
+    function isPeakHour(hourUtc) {
+      const h = parseInt(hourUtc.slice(0, 2), 10);
+      return (DATA?.meta?.peak_hours || []).includes(h);
+    }
+
+    function isSparseCell(r) {
+      return (r?.n_days ?? 0) > 0 && ((r.n_days ?? 0) < 3 || (r?.n ?? 0) < 5);
+    }
+
+    function isCurrentPoint(point) {
+      if (!point || !BASE_POINT) return true;
+      if (point.name === BASE_POINT.name) return true;
+      return Math.abs((point.scale ?? 1) - 1) < 0.001 && Math.abs((point.load ?? 1) - 1) < 0.001;
+    }
+
+    function hourAllByUtc(point) {
+      const m = new Map();
+      for (const r of point?.by_hour || []) m.set(r.hour_utc, r);
+      return m;
+    }
+
+    function dgroupLookup(point) {
+      const m = new Map();
+      for (const r of point?.by_hour_d_group || []) m.set(`${r.hour_utc}|${r.d_group}`, r);
+      return m;
+    }
+
+    function vsCurrentSuffix(cur, base, invertBetter) {
+      if (cur == null || base == null) return "";
+      const p = pct(cur, base);
+      if (p === "—") return "";
+      if (Math.abs(cur - base) < 0.05) {
+        return ` <span class="cell-vs">(0.0% vs current)</span>`;
+      }
+      return ` <span class="cell-vs ${clsDelta(cur - base, invertBetter)}">(${p} vs current)</span>`;
+    }
+
+    function vsMonoSuffix(shard, mono) {
+      const p = pct(shard, mono);
+      if (p === "—") return "";
+      return ` <span class="cell-vs">(${p} vs mono)</span>`;
+    }
+
+    function dgColClass(idx) {
+      return typeof idx === "number" && idx >= 0 && idx < D_GROUP_ORDER.length
+        ? `col-dg-${idx}` : "col-dg-total";
+    }
+
+    function hourDGroupCell(r, side, baseR, vsCurrent, dgClass) {
+      if (!r) return `<td class="num col-${side} ${dgClass}">—</td>`;
+      const v = metric(r, side, "total");
+      const sparse = isSparseCell(r);
+      const tip = sparse ? ` title="n=${r.n}, ${r.n_days}d — мало данных"` : "";
+      const bv = baseR ? metric(baseR, side, "total") : null;
+      const suffix = vsCurrent ? vsCurrentSuffix(v, bv, true) : "";
+      return `<td class="num col-${side} ${dgClass}${sparse ? " cell-sparse" : ""}"${tip}>${fmt(v)}${suffix}</td>`;
+    }
+
+    function hourDGroupDeltaCell(r, baseR, vsCurrent, dgClass) {
+      if (!r) return `<td class="num col-delta ${dgClass}">—</td>`;
+      const mono = metric(r, "mono", "total");
+      const shard = metric(r, "shard", "total");
+      const delta = (shard ?? 0) - (mono ?? 0);
+      const sparse = isSparseCell(r);
+      const tip = sparse ? ` title="n=${r.n}, ${r.n_days}d — мало данных"` : "";
+      const pctStr = pct(shard, mono);
+      let suffix = "";
+      if (vsCurrent && baseR) {
+        const bMono = metric(baseR, "mono", "total");
+        const bShard = metric(baseR, "shard", "total");
+        const bDelta = (bShard ?? 0) - (bMono ?? 0);
+        suffix = vsCurrentSuffix(delta, bDelta, true);
+      }
+      return `<td class="num col-delta ${dgClass} ${clsDelta(delta, true)}${sparse ? " cell-sparse" : ""}"${tip}>${fmt(delta)}${vsMonoSuffix(shard, mono)}${suffix}</td>`;
+    }
+
+    function hourTotalCell(hourRow, side, baseHourRow, vsCurrent, dgClass) {
+      if (!hourRow) return `<td class="num col-${side} ${dgClass}">—</td>`;
+      const v = metric(hourRow, side, "total");
+      const sparse = isSparseCell(hourRow);
+      const tip = sparse ? ` title="n=${hourRow.n}, ${hourRow.n_days}d — все D"` : "";
+      const bv = baseHourRow ? metric(baseHourRow, side, "total") : null;
+      const suffix = vsCurrent ? vsCurrentSuffix(v, bv, true) : "";
+      return `<td class="num col-${side} ${dgClass}${sparse ? " cell-sparse" : ""}"${tip}><strong>${fmt(v)}</strong>${suffix}</td>`;
+    }
+
+    function hourTotalDeltaCell(hourRow, baseHourRow, vsCurrent, dgClass) {
+      if (!hourRow) return `<td class="num col-delta ${dgClass}">—</td>`;
+      const mono = metric(hourRow, "mono", "total");
+      const shard = metric(hourRow, "shard", "total");
+      const delta = (shard ?? 0) - (mono ?? 0);
+      const sparse = isSparseCell(hourRow);
+      const tip = sparse ? ` title="n=${hourRow.n}, ${hourRow.n_days}d — все D"` : "";
+      let suffix = "";
+      if (vsCurrent && baseHourRow) {
+        const bMono = metric(baseHourRow, "mono", "total");
+        const bShard = metric(baseHourRow, "shard", "total");
+        const bDelta = (bShard ?? 0) - (bMono ?? 0);
+        suffix = vsCurrentSuffix(delta, bDelta, true);
+      }
+      return `<td class="num col-delta ${dgClass} ${clsDelta(delta, true)}${sparse ? " cell-sparse" : ""}"${tip}><strong>${fmt(delta)}</strong>${vsMonoSuffix(shard, mono)}${suffix}</td>`;
+    }
+
+    function footerTotalCell(point, side, vsCurrent, dgClass) {
+      const v = metric(point?.overall, side, "total");
+      const bv = vsCurrent ? metric(BASE_POINT?.overall, side, "total") : null;
+      const suffix = vsCurrent ? vsCurrentSuffix(v, bv, true) : "";
+      return `<td class="num col-${side} ${dgClass}"><strong>${fmt(v)}</strong>${suffix}</td>`;
+    }
+
+    function footerTotalDeltaCell(point, vsCurrent, dgClass) {
+      const mono = metric(point?.overall, "mono", "total");
+      const shard = metric(point?.overall, "shard", "total");
+      const delta = (shard ?? 0) - (mono ?? 0);
+      let suffix = "";
+      if (vsCurrent && BASE_POINT?.overall) {
+        const bMono = metric(BASE_POINT.overall, "mono", "total");
+        const bShard = metric(BASE_POINT.overall, "shard", "total");
+        const bDelta = (bShard ?? 0) - (bMono ?? 0);
+        suffix = vsCurrentSuffix(delta, bDelta, true);
+      }
+      return `<td class="num col-delta ${dgClass} ${clsDelta(delta, true)}"><strong>${fmt(delta)}</strong>${vsMonoSuffix(shard, mono)}${suffix}</td>`;
+    }
+
+    function dgHeaderCells(hdrSide) {
+      const dg = (i) => `<th class="hdr-${hdrSide} sub ${dgColClass(i)}">${D_GROUP_ORDER[i]}</th>`;
+      return D_GROUP_ORDER.map((_, i) => dg(i)).join("")
+        + `<th class="hdr-${hdrSide} sub ${dgColClass("total")}">${HOUR_TOTAL_LABEL}</th>`;
+    }
+
+    function renderHourDGroupLegend() {
+      const el = document.getElementById("hour-dgroup-legend");
+      if (!el) return;
+      const dgSwatches = D_GROUP_ORDER.map((label, i) =>
+        `<span class="swatch sw-dg-${i}"></span>${label}`).join(" · ");
+      el.innerHTML = `
+        ${dgSwatches} · <span class="swatch sw-dg-total"></span>${HOUR_TOTAL_LABEL}
+        — одна подложка = один D (mono / shard / Δ в одной «колонке»)
+        · <span class="good">зелёный Δ</span> — sharding быстрее
+        · <span class="bad">красный Δ</span> — sharding медленнее
+        · <span class="cell-sparse cell-sparse-demo">рамка</span> — мало run'ов/дней`;
+    }
+
+    function renderHourDGroupTable(point) {
+      const thead = document.getElementById("hour-dgroup-thead");
+      const tbody = document.querySelector("#hour-dgroup-table tbody");
+      const tfoot = document.getElementById("hour-dgroup-tfoot");
+      const subtitle = document.getElementById("hour-dgroup-subtitle");
+      if (!tbody || !thead) return;
+
+      const source = point || BASE_POINT;
+      const vsCurrent = !isCurrentPoint(source);
+      const baseDgroup = dgroupLookup(BASE_POINT);
+      const hourAll = hourAllByUtc(source);
+      const baseHourAll = hourAllByUtc(BASE_POINT);
+      const pl = pctLabel(ACTIVE_PCT);
+      const nd = D_GROUP_ORDER.length;
+      const cols = nd + 1;
+
+      if (subtitle) {
+        let line = source?.name === "current"
+          ? "current · будни UTC"
+          : `${source?.name ?? "—"} · будни UTC`;
+        line += ` · total ${pl}`;
+        if (vsCurrent) line += " · mono/shard: (±% vs current); Δ: (±% vs mono) (±% vs current)";
+        if (showPeakHoursOnly) {
+          line += " · строки — только пик; итого — по всем часам";
+        }
+        subtitle.textContent = line;
+      }
+      renderHourDGroupLegend();
+
+      thead.innerHTML = `
+        <tr>
+          <th rowspan="2">Час UTC</th>
+          <th colspan="${cols}" class="hdr-mono">Монолит</th>
+          <th colspan="${cols}" class="hdr-shard">Sharding</th>
+          <th colspan="${cols}" class="hdr-delta">Δ (shard − mono)</th>
+        </tr>
+        <tr>
+          ${dgHeaderCells("mono")}
+          ${dgHeaderCells("shard")}
+          ${dgHeaderCells("delta")}
+        </tr>`;
+
+      const raw = source?.by_hour_d_group || [];
+      const filtered = raw.filter((r) => !showPeakHoursOnly || isPeakHour(r.hour_utc));
+      const byHour = new Map();
+      for (const r of filtered) {
+        if (!byHour.has(r.hour_utc)) byHour.set(r.hour_utc, {});
+        byHour.get(r.hour_utc)[r.d_group] = r;
+      }
+      const hours = [...byHour.keys()].sort();
+
+      if (!hours.length) {
+        tbody.innerHTML = `<tr><td colspan="${1 + cols * 3}" style="color:var(--muted)">нет данных — перезапустите export</td></tr>`;
+        if (tfoot) tfoot.innerHTML = "";
+        return;
+      }
+
+      tbody.innerHTML = hours.map((hour) => {
+        const bucket = byHour.get(hour);
+        const peak = isPeakHour(hour);
+        const hourRow = hourAll.get(hour);
+        const baseHourRow = baseHourAll.get(hour);
+        return `<tr class="${peak ? "row-peak" : ""}" data-hour="${hour}">
+          <td class="num">${hour}</td>
+          ${D_GROUP_ORDER.map((d, i) => hourDGroupCell(bucket?.[d], "mono", baseDgroup.get(`${hour}|${d}`), vsCurrent, dgColClass(i))).join("")}
+          ${hourTotalCell(hourRow, "mono", baseHourRow, vsCurrent, dgColClass("total"))}
+          ${D_GROUP_ORDER.map((d, i) => hourDGroupCell(bucket?.[d], "shard", baseDgroup.get(`${hour}|${d}`), vsCurrent, dgColClass(i))).join("")}
+          ${hourTotalCell(hourRow, "shard", baseHourRow, vsCurrent, dgColClass("total"))}
+          ${D_GROUP_ORDER.map((d, i) => hourDGroupDeltaCell(bucket?.[d], baseDgroup.get(`${hour}|${d}`), vsCurrent, dgColClass(i))).join("")}
+          ${hourTotalDeltaCell(hourRow, baseHourRow, vsCurrent, dgColClass("total"))}
+        </tr>`;
+      }).join("");
+
+      const totals = source?.by_d_group || [];
+      const byD = Object.fromEntries(totals.map((r) => [r.d_group, r]));
+      const baseByD = Object.fromEntries((BASE_POINT?.by_d_group || []).map((r) => [r.d_group, r]));
+      if (tfoot) {
+        tfoot.innerHTML = `<tr class="row-total">
+          <th>Итого</th>
+          ${D_GROUP_ORDER.map((d, i) => hourDGroupCell(byD[d], "mono", baseByD[d], vsCurrent, dgColClass(i))).join("")}
+          ${footerTotalCell(source, "mono", vsCurrent, dgColClass("total"))}
+          ${D_GROUP_ORDER.map((d, i) => hourDGroupCell(byD[d], "shard", baseByD[d], vsCurrent, dgColClass(i))).join("")}
+          ${footerTotalCell(source, "shard", vsCurrent, dgColClass("total"))}
+          ${D_GROUP_ORDER.map((d, i) => hourDGroupDeltaCell(byD[d], baseByD[d], vsCurrent, dgColClass(i))).join("")}
+          ${footerTotalDeltaCell(source, vsCurrent, dgColClass("total"))}
+        </tr>`;
+      }
+      highlightHourDGroupRow(selectedChartHour);
+    }
+
+    function buildHourDGroupFilter() {
+      const el = document.getElementById("hour-dgroup-filter");
+      if (!el) return;
+      const peak = DATA?.meta?.peak_hours || [];
+      if (peak.length && el.parentElement) {
+        const p0 = String(peak[0]).padStart(2, "0");
+        const p1 = String(peak.at(-1)).padStart(2, "0");
+        el.parentElement.appendChild(document.createTextNode(` Только пик ${p0}–${p1} UTC`));
+      }
+      el.checked = showPeakHoursOnly;
+      el.addEventListener("change", () => {
+        showPeakHoursOnly = el.checked;
+        renderHourDGroupTable(pointAtIndices(scaleIdx, loadIdx));
+      });
+    }
+
+    function buildPctSelect() {
+      const sel = document.getElementById("pct-select");
+      sel.innerHTML = AVAILABLE_PCTS.map((p) =>
+        `<option value="${p}"${p === ACTIVE_PCT ? " selected" : ""}>${pctLabel(p)}</option>`
+      ).join("");
+      sel.addEventListener("change", () => {
+        ACTIVE_PCT = parseFloat(sel.value, 10);
+        updatePctHint();
+        renderConclusion();
+        renderScenarioTable();
+        renderHourDGroupTable(pointAtIndices(scaleIdx, loadIdx));
+        renderChartLegendHint();
+        updatePlay();
+      });
+    }
+
+    function buildSliders() {
+      const sweeps = DATA.scale_sweeps || [1];
+      const loads = DATA.load_sweeps || [1];
+      scaleIdx = defaultScaleIdx();
+      loadIdx = defaultLoadIdx();
+      document.getElementById("sliders").innerHTML = `
+        <div class="slider">
+          <label>Квоты (instances + vCPU + RAM + SSD): <strong id="val-scale">${scaleLabel(sweeps[scaleIdx])}</strong></label>
+          <input type="range" id="sl-scale" min="0" max="${sweeps.length - 1}" step="1" value="${scaleIdx}" />
+        </div>`;
+      document.getElementById("sl-scale").addEventListener("input", (e) => {
+        scaleIdx = parseInt(e.target.value, 10);
+        updatePlay();
+      });
+      const loadBox = document.getElementById("load-slider");
+      loadBox.innerHTML = `
+        <h3 class="subhead">Поток PR-check</h3>
+        <p class="hint">Симуляция роста числа PR-check run'ов при тех же квотах.</p>
+        <div class="slider">
+          <label>Нагрузка: <strong id="val-load">${loadLabel(loads[loadIdx])}</strong></label>
+          <input type="range" id="sl-load" min="0" max="${loads.length - 1}" step="1" value="${loadIdx}" />
+        </div>
+        <p class="hint" id="load-hint"></p>`;
+      document.getElementById("sl-load").addEventListener("input", (e) => {
+        loadIdx = parseInt(e.target.value, 10);
+        updatePlay();
+      });
+      const loadHint = document.getElementById("load-hint");
+      if (loadHint && DATA.meta?.load_note) {
+        loadHint.textContent = DATA.meta.load_note;
+      }
+    }
+
+    function scaleKey(scale) {
+      const n = Math.round(Number(scale) * 10000) / 10000;
+      const plans = DATA?.runner_plans || {};
+      for (const k of Object.keys(plans)) {
+        if (Math.abs(Number(k) - n) < 0.0001) return k;
+      }
+      return String(n);
+    }
+
+    function currentRunnerPlan() {
+      const scale = (DATA.scale_sweeps || [1])[scaleIdx];
+      return DATA.runner_plans?.[scaleKey(scale)] ?? null;
+    }
+
+    function fmtQuotaDelta(d, opts = {}) {
+      if (!d) return "—";
+      const { signed = true, emptyLabel = "без изменений" } = opts;
+      const parts = QUOTA_KEYS.filter((k) => d[k]).map((k) => {
+        const v = d[k];
+        const sign = signed && v > 0 ? "+" : "";
+        return `${QUOTA_LABELS[k]} ${sign}${v.toLocaleString("ru-RU")}`;
+      });
+      return parts.length ? parts.join(", ") : emptyLabel;
+    }
+
+    function fmtQuotaRow(current, next, delta) {
+      const cur = current?.toLocaleString("ru-RU") ?? "—";
+      const nxt = next?.toLocaleString("ru-RU") ?? "—";
+      if (!delta) return `${cur}`;
+      const sign = delta > 0 ? "+" : "";
+      return `${cur} → <strong>${nxt}</strong> <span class="cell-vs">(${sign}${delta.toLocaleString("ru-RU")})</span>`;
+    }
+
+    function quotaTrimRows(plan) {
+      const b = plan?.bottleneck;
+      if (!b) return { rows: [], legacy: true };
+      const rows = b.quota_trim || b.quota_trim_rwdi;
+      if (rows?.length) return { rows, legacy: false };
+      if (b.pr_check || (b.rwdi?.resources?.[0]?.quota_current != null)) {
+        return { rows: [], legacy: false };
+      }
+      return { rows: [], legacy: true };
+    }
+
+    function renderRunnerTrimSummary(plan) {
+      const el = document.getElementById("runner-trim-summary");
+      if (!el || !plan?.bottleneck) return;
+      const pr = prCheckAnalysis(plan);
+      const rwdi = plan.bottleneck.rwdi;
+      const asan = plan.bottleneck.asan;
+      const { rows, legacy } = quotaTrimRows(plan);
+      if (legacy) {
+        el.innerHTML = `<p class="hint warn">Данные устарели — перезапустите <code>export_comparison_data.py</code>, чтобы увидеть расчёт по паре rwdi+asan.</p>`;
+        return;
+      }
+      if (!rows.length) {
+        el.innerHTML = `<p class="hint">При <strong>${pr.max_concurrent}</strong> PR-check (rwdi+asan) все ресурсы на лимите — ужимать квоты без потери параллелизма некуда.</p>`;
+        return;
+      }
+      el.innerHTML = `
+        <p class="hint">Один PR-check = <strong>relwithdebinfo + release-asan</strong> одновременно (wall = max из двух).
+        Сейчас влезает <strong>${pr.max_concurrent}</strong> таких пар; лимит — <strong>${pr.binding_label}</strong>.
+        Отдельно (если бы работал только один preset): rwdi ${rwdi?.max_concurrent ?? "—"} (${rwdi?.binding_label ?? "—"}), asan ${asan?.max_concurrent ?? "—"} (${asan?.binding_label ?? "—"}).</p>
+        <table class="play-table" id="runner-trim-table">
+          <thead>
+            <tr>
+              <th>Ресурс</th>
+              <th>Сейчас</th>
+              <th>Можно убрать</th>
+              <th>Минимум</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rows.map((r) => `
+              <tr>
+                <td>${r.label}</td>
+                <td class="num">${r.quota_current.toLocaleString("ru-RU")}</td>
+                <td class="num good">−${r.quota_trim.toLocaleString("ru-RU")}</td>
+                <td class="num"><strong>${r.quota_min.toLocaleString("ru-RU")}</strong></td>
+              </tr>`).join("")}
+          </tbody>
+        </table>`;
+    }
+
+    function renderRunnerBottleneck(plan) {
+      const el = document.getElementById("runner-bottleneck");
+      if (!el || !plan?.bottleneck) return;
+      const pr = prCheckAnalysis(plan);
+      const rwdi = plan.bottleneck.rwdi;
+      const asan = plan.bottleneck.asan;
+      const plus = pr.plus_one_runner?.quota_delta || pr.plus_one_runner?.delta_quotas || {};
+      const plusNew = pr.plus_one_runner?.new_quotas || {};
+      const curQ = pr.quotas || plan.bottleneck.quotas || {};
+      const fp = pr.branch_footprints || pr.runner_footprint;
+      const fpNote = fp?.rwdi && fp?.asan
+        ? `На пару: 2 VM, ${fp.rwdi.vcpu + fp.asan.vcpu} vCPU, ${fp.rwdi.ram_gb + fp.asan.ram_gb} GB RAM, ${fp.rwdi.nrd_ssd_gb + fp.asan.nrd_ssd_gb} GB SSD`
+        : "";
+      el.innerHTML = `
+        <p><strong>+1 PR-check (ещё одна пара rwdi+asan):</strong> добавить к квотам ${fmtQuotaDelta(plus)} → будет <strong>${pr.plus_one_runner?.new_max_concurrent ?? "—"}</strong> пар.</p>
+        ${fpNote ? `<p class="hint">${fpNote} (rwdi: ${fp.rwdi.vcpu}/${fp.rwdi.ram_gb}/${fp.rwdi.nrd_ssd_gb} + asan: ${fp.asan.vcpu}/${fp.asan.ram_gb}/${fp.asan.nrd_ssd_gb}).</p>` : ""}
+        <details class="runner-details">
+          <summary>Квоты после +1 PR-check</summary>
+          <div class="quota-grid">${QUOTA_KEYS.map((k) =>
+            `<span>${QUOTA_LABELS[k]}: ${fmtQuotaRow(curQ[k], plusNew[k], plus[k])}</span>`
+          ).join("")}</div>
+        </details>`;
+    }
+
+    function renderRunnerResourceTable(plan) {
+      const tbody = document.querySelector("#runner-resource-table tbody");
+      const pr = prCheckAnalysis(plan);
+      if (!tbody || !pr) return;
+      const cap = pr.max_concurrent;
+      const rows = pr.resources || [];
+      const curQ = pr.quotas || plan.bottleneck?.quotas || {};
+      tbody.innerHTML = rows.map((r) => {
+        const cur = r.quota_current ?? curQ[r.resource];
+        const trim = r.quota_trim;
+        const minQ = r.quota_min;
+        const trimCell = r.binding
+          ? "—"
+          : (trim != null && trim > 0 ? `−${trim.toLocaleString("ru-RU")}` : (trim === 0 ? "0" : "—"));
+        const minCell = r.binding ? "—" : (minQ?.toLocaleString("ru-RU") ?? "—");
+        return `
+        <tr class="${r.binding ? "row-peak" : ""}">
+          <td>${r.label}${r.binding ? " · лимит" : ""}</td>
+          <td class="num">${cur?.toLocaleString("ru-RU") ?? "—"}</td>
+          <td class="num">${r.slots}</td>
+          <td class="num">${cap}</td>
+          <td class="num">${trimCell}</td>
+          <td class="num">${minCell}</td>
+        </tr>`;
+      }).join("");
+    }
+
+    function buildRunnerCalc() {
+      const sec = document.getElementById("sec-runner-calc");
+      const plan = currentRunnerPlan();
+      if (!sec) return;
+      if (!plan?.steps?.length) {
+        sec.classList.add("hidden");
+        const hint = document.getElementById("runner-calc-hint");
+        if (hint) {
+          hint.textContent = "Калькулятор квот: в JSON нет runner_plans — перезапустите export_comparison_data.py";
+        }
+        return;
+      }
+      sec.classList.remove("hidden");
+      const dMin = DATA.runner_delta_min ?? -3;
+      const dMax = DATA.runner_delta_max ?? 10;
+      runnerDeltaIdx = plan.steps.findIndex((s) => s.delta_runners === 0);
+      if (runnerDeltaIdx < 0) runnerDeltaIdx = 0;
+      const box = document.getElementById("runner-sliders");
+      if (!box) return;
+      box.innerHTML = `
+        <div class="slider">
+          <label>PR-check одновременно (rwdi+asan): <strong id="val-runner-delta">${plan.steps[runnerDeltaIdx]?.target_pairs ?? plan.steps[runnerDeltaIdx]?.target_rwdi ?? "—"}</strong> <span class="hint-inline" id="val-runner-delta-hint"></span></label>
+          <input type="range" id="sl-runner" min="0" max="${plan.steps.length - 1}" step="1" value="${runnerDeltaIdx}" />
+        </div>`;
+      document.getElementById("sl-runner").addEventListener("input", (e) => {
+        runnerDeltaIdx = parseInt(e.target.value, 10);
+        updateRunnerCalc(false);
+      });
+      const hint = document.getElementById("runner-calc-hint");
+      if (hint) {
+        hint.textContent = "Сдвиньте ползунок — какие квоты нужны для N одновременных PR-check (каждый = relwithdebinfo + release-asan) и как изменятся метрики (симуляция load=100%).";
+      }
+      updateRunnerCalc(false);
+    }
+
+    function updateRunnerCalc(resetIdx = true) {
+      const plan = currentRunnerPlan();
+      const sec = document.getElementById("sec-runner-calc");
+      if (!sec || !plan?.steps?.length) {
+        sec?.classList.add("hidden");
+        return;
+      }
+      sec.classList.remove("hidden");
+      if (resetIdx) {
+        runnerDeltaIdx = plan.steps.findIndex((s) => s.delta_runners === 0);
+        if (runnerDeltaIdx < 0) runnerDeltaIdx = 0;
+        const sl = document.getElementById("sl-runner");
+        if (sl) {
+          sl.max = plan.steps.length - 1;
+          sl.value = runnerDeltaIdx;
+        }
+      }
+      const step = plan.steps[runnerDeltaIdx];
+      const base = plan.steps.find((s) => s.delta_runners === 0) || plan.steps[0];
+      const baselinePairs = plan.baseline_pairs ?? plan.baseline_rwdi ?? base.target_pairs ?? base.target_rwdi;
+      const val = document.getElementById("val-runner-delta");
+      const valHint = document.getElementById("val-runner-delta-hint");
+      const target = step.target_pairs ?? step.target_rwdi;
+      if (val) {
+        val.textContent = String(target);
+      }
+      if (valHint) {
+        const d = step.delta_pairs ?? step.delta_runners;
+        valHint.textContent = d === 0
+          ? `(текущие квоты, ${baselinePairs} пар)`
+          : `(Δ ${d > 0 ? "+" : ""}${d} PR-check от ${baselinePairs})`;
+      }
+      renderRunnerTrimSummary(plan);
+      renderRunnerBottleneck(plan);
+      renderRunnerResourceTable(plan);
+      const load = (DATA.load_sweeps || [1])[loadIdx];
+      const loadNote = document.getElementById("runner-load-note");
+      if (loadNote) {
+        loadNote.textContent = Math.abs(load - 1) > 0.001
+          ? `⚠ Ползунок PR-check на ${loadLabel(load)} — метрики ниже для load=100%.`
+          : "";
+      }
+      const tbody = document.querySelector("#runner-step-table tbody");
+      if (!tbody) return;
+      const o = step.overall;
+      const b = base.overall;
+      const cap = step.capacity || {};
+      const fmtRow = (label, side) => {
+        const total = metric(o, side, "total");
+        const wait = metric(o, side, "wait");
+        const bt = metric(b, side, "total");
+        const bw = metric(b, side, "wait");
+        return `<tr>
+          <td><strong>${label}</strong></td>
+          <td class="num">${fmt(total)}</td>
+          <td class="num ${clsDelta(total - bt, true)}">${fmt(total - bt)} (${pct(total, bt)})</td>
+          <td class="num">${fmt(wait)}</td>
+          <td class="num ${clsDelta(wait - bw, true)}">${fmt(wait - bw)} (${pct(wait, bw)})</td>
+        </tr>`;
+      };
+      tbody.innerHTML = fmtRow("Монолит", "mono") + fmtRow("Sharding", "shard");
+      const curQ = plan.bottleneck?.quotas || base.quotas || {};
+      const qTable = document.getElementById("runner-quota-table");
+      if (qTable) {
+        const tbodyQ = qTable.querySelector("tbody");
+        if (tbodyQ) {
+          tbodyQ.innerHTML = QUOTA_KEYS.map((k) => {
+            const cur = curQ[k];
+            const nxt = step.quotas[k];
+            const d = step.quota_delta?.[k] ?? (nxt - cur);
+            const binding = step.binding === k;
+            return `<tr class="${binding ? "row-peak" : ""}">
+              <td>${QUOTA_LABELS[k]}${binding ? " · меняется" : ""}</td>
+              <td class="num">${cur?.toLocaleString("ru-RU") ?? "—"}</td>
+              <td class="num"><strong>${nxt?.toLocaleString("ru-RU") ?? "—"}</strong></td>
+              <td class="num ${d < 0 ? "good" : d > 0 ? "bad" : ""}">${d ? `${d > 0 ? "+" : ""}${d.toLocaleString("ru-RU")}` : "0"}</td>
+            </tr>`;
+          }).join("");
+        }
+      }
+      const qEl = document.getElementById("runner-quota-delta");
+      if (qEl) qEl.textContent = fmtQuotaDelta(step.quota_delta);
+      const qGrid = document.getElementById("runner-quota-grid");
+      if (qGrid) qGrid.innerHTML = "";
+      const capEl = document.getElementById("runner-capacity-line");
+      if (capEl) {
+        capEl.textContent = `При этих квотах: VM budget ${fmt(step.vm_budget)} · peak mono/shard ${cap.peak_mono}/${cap.peak_shard} · очередь ${cap.queued_mono}/${cap.queued_shard} · лимит ${cap.binding_label}, ~${maxPrCheck(cap)} PR-check (rwdi+asan)`;
+      }
+    }
+
+    function updatePlay() {
+      const sweeps = DATA.scale_sweeps || [1];
+      const loads = DATA.load_sweeps || [1];
+      const scale = sweeps[scaleIdx];
+      const load = loads[loadIdx];
+      document.getElementById("val-scale").textContent = scaleLabel(scale);
+      document.getElementById("val-load").textContent = loadLabel(load);
+      const p = pointAtIndices(scaleIdx, loadIdx);
+      selectedChartHour = null;
+      renderQuotaGrid(p.quotas);
+      renderCapacityLine(p.capacity);
+      document.getElementById("sl-scale").value = scaleIdx;
+      document.getElementById("sl-load").value = loadIdx;
+      renderHourlyCharts(p);
+      renderHourDGroupTable(p);
+      updateRunnerCalc(true);
+    }
+
+    async function loadData() {
+      const embedded = document.getElementById("simulation-data");
+      const raw = embedded?.textContent?.trim();
+      if (raw) return JSON.parse(raw);
+      const r = await fetch("simulation_results.json", { cache: "no-store" });
+      if (!r.ok) throw new Error(String(r.status));
+      return r.json();
+    }
+
+    async function init() {
+      try {
+        DATA = await loadData();
+        BASE = DATA.base_quotas;
+        BASE_POINT = DATA.interactive.find(
+          (p) => Math.abs(p.scale - 1) < 0.001 && Math.abs((p.load ?? 1) - 1) < 0.001
+        ) || DATA.scenarios.find((s) => s.name === "current") || DATA.interactive[0];
+        scaleIdx = defaultScaleIdx();
+        loadIdx = defaultLoadIdx();
+        AVAILABLE_PCTS = DATA.meta?.percentiles?.length ? DATA.meta.percentiles : [90];
+        ACTIVE_PCT = DATA.meta?.primary_percentile ?? AVAILABLE_PCTS.at(-1) ?? 90;
+        const m = DATA.meta;
+        let metaLine =
+          `${m.repo} · ${m.since.slice(0, 10)} … ${m.until.slice(0, 10)} · ${m.jobs_count} jobs · ${m.pr_runs_count} PR-check · будни UTC`;
+        const pool = m.pool;
+        if (pool) {
+          metaLine += ` · static ${pool.static_instances} → budget ${pool.runner_budget_instances} inst · peak ${pool.peak_instances_mono}/${pool.peak_instances_shard}`;
+          if (pool.binding_label) {
+            metaLine += ` · binding ${pool.binding_label} ~${maxPrCheck(pool)} PR-check`;
+          }
+        }
+        if (m.dataset_partial) {
+          const seen = m.collect_stats?.runs_with_jobs;
+          const total = m.collect_stats?.runs_seen;
+          metaLine += seen && total ? ` · ⚠ кэш ${seen}/${total} runs` : " · ⚠ неполный кэш";
+        }
+        if (m.classify_note) {
+          metaLine += ` · ⚠ ${m.classify_note}`;
+        }
+        document.getElementById("meta-line").textContent = metaLine;
+        buildPctSelect();
+        updatePctHint();
+        renderConclusion();
+        renderScenarioTable();
+        buildHourDGroupFilter();
+        buildSliders();
+        buildRunnerCalc();
+        updatePlay();
+      } catch (e) {
+        document.getElementById("conclusion").textContent =
+          "Нет данных: " + e.message
+          + ". Для file:// перезапустите generate_comparison_page.ipynb (данные встраиваются в HTML). "
+          + "Или: python3 -m http.server из корня репо и откройте http://localhost:8000/capacity_comparison.html";
+      }
+    }
+    init();

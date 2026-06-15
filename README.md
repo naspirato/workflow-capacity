@@ -11,8 +11,11 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install -e .
 gh auth login   # для сбора данных
 
-# Jupyter
+# Jupyter — интерактивный анализ
 jupyter notebook notebooks/capacity_explorer.ipynb
+
+# HTML-страница сравнения (Run All в ноутбуке → открыть capacity_comparison.html)
+jupyter notebook notebooks/generate_comparison_page.ipynb
 ```
 
 ## Структура
@@ -29,6 +32,7 @@ workflow_capacity/            # ядро симулятора
   collect.py                  # GitHub API collector
   augment.py                  # base_ref из PR API
 notebooks/capacity_explorer.ipynb
+notebooks/generate_comparison_page.ipynb   # → capacity_comparison.html
 data/cache/                   # jobs_*.json (gitignored)
 ```
 
@@ -69,6 +73,8 @@ ds = ensure_dataset(days=14)  # из кэша
 ```
 
 Разные окна (7d, 14d, 30d) лежат **рядом** — перевыкачка не нужна при смене vCPU/RAM/instances.
+
+При **augment** в тот же JSON пишется `pr_files`: для каждого PR — `file_count` и список путей. Правила sharded vs monolith — секция `pr_classify` в `config/capacity.example.yml` (можно менять без перевыкачки).
 
 ## CLI (опционально)
 
