@@ -568,28 +568,44 @@ def _embed_payload_in_html(html: str, payload: dict[str, Any]) -> str:
     return html.replace("</body>", f"  {block}\n</body>", 1)
 
 
-def write_comparison_payload(payload: dict[str, Any], *, root: Path) -> list[Path]:
-    """Write JSON and embed payload into capacity_comparison.html for file:// viewing."""
+def _strip_embedded_payload(html: str) -> str:
+    """Remove inlined simulation JSON — Pages and http.server use simulation_results.json."""
+    stripped, n = _SIMULATION_DATA_RE.subn("", html, count=1)
+    if n:
+        return stripped
+    return html
+
+
+def write_comparison_payload(
+    payload: dict[str, Any],
+    *,
+    root: Path,
+    embed_local: bool = False,
+) -> list[Path]:
+    """Write root JSON for GitHub Pages; keep index.html thin (fetch, no embed)."""
     text = json.dumps(payload, indent=2)
     size_mb = len(text) / (1024 * 1024)
-    status(f"export: writing JSON ({size_mb:.1f} MB) ...")
-    paths = [
-        root / "data" / "simulation_results.json",
-        root / "simulation_results.json",
-    ]
-    for path in paths:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text, encoding="utf-8")
+    status(f"export: writing simulation_results.json ({size_mb:.1f} MB) ...")
+    paths: list[Path] = []
 
-    html_paths = [root / "capacity_comparison.html", root / "index.html"]
-    existing = [p for p in html_paths if p.exists()]
-    if existing:
-        status(f"export: embedding payload into {len(existing)} HTML file(s) ...")
-    for html_path in html_paths:
-        if html_path.exists():
-            html_paths_written = _embed_payload_in_html(
-                html_path.read_text(encoding="utf-8"), payload
-            )
-            html_path.write_text(html_paths_written, encoding="utf-8")
-            paths.append(html_path)
+    json_path = root / "simulation_results.json"
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    json_path.write_text(text, encoding="utf-8")
+    paths.append(json_path)
+
+    index_path = root / "index.html"
+    if index_path.exists():
+        status("export: index.html — без embed, данные из simulation_results.json")
+        index_path.write_text(_strip_embedded_payload(index_path.read_text(encoding="utf-8")), encoding="utf-8")
+        paths.append(index_path)
+
+    local_path = root / "capacity_comparison.html"
+    if embed_local:
+        source = local_path if local_path.exists() else index_path
+        if source.exists():
+            status("export: capacity_comparison.html — embed для file:// ...")
+            html = _embed_payload_in_html(_strip_embedded_payload(source.read_text(encoding="utf-8")), payload)
+            local_path.write_text(html, encoding="utf-8")
+            paths.append(local_path)
+
     return paths

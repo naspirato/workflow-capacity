@@ -8,10 +8,16 @@
 
     const QUOTA_KEYS = ["instances", "vcpu", "ram_gb", "nrd_ssd_gb"];
     const QUOTA_LABELS = {
-      instances: "Instances",
+      instances: "Instances, шт.",
+      vcpu: "vCPU, шт.",
+      ram_gb: "RAM, ГБ",
+      nrd_ssd_gb: "SSD (NRD), ГБ",
+    };
+    const QUOTA_UNITS = {
+      instances: "шт.",
       vcpu: "vCPU",
-      ram_gb: "RAM, GB",
-      nrd_ssd_gb: "SSD, GB",
+      ram_gb: "ГБ",
+      nrd_ssd_gb: "ГБ",
     };
     const BINDING_LABELS = {
       instances: "instances",
@@ -441,7 +447,7 @@
       const el = document.getElementById("quota-grid");
       if (!el || !quotas) return;
       el.innerHTML = QUOTA_KEYS.map((k) =>
-        `<span>${QUOTA_LABELS[k]}: <strong>${quotas[k]?.toLocaleString("ru-RU")}</strong> <span class="num" style="color:var(--muted)">(${pct(quotas[k], BASE[k])})</span></span>`
+        `<span>${quotaLabel(k)}: <strong>${fmtQuotaAmt(k, quotas[k])}</strong> <span class="num" style="color:var(--muted)">(${pct(quotas[k], BASE[k])})</span></span>`
       ).join("");
     }
 
@@ -834,23 +840,49 @@
       return DATA.runner_plans?.[scaleKey(scale)] ?? null;
     }
 
+    function fmtQuotaAmt(key, value, opts = {}) {
+      if (value == null || value === "—") return "—";
+      const { signed = false, strong = false } = opts;
+      const n = Number(value);
+      if (!Number.isFinite(n)) return "—";
+      const unit = QUOTA_UNITS[key] || "";
+      let text;
+      if (signed && n !== 0) {
+        const sign = n > 0 ? "+" : "−";
+        text = unit === "vCPU"
+          ? `${sign}${Math.abs(n).toLocaleString("ru-RU")} ${unit}`
+          : `${sign}${Math.abs(n).toLocaleString("ru-RU")} ${unit}`;
+      } else if (unit === "vCPU") {
+        text = `${n.toLocaleString("ru-RU")} ${unit}`;
+      } else {
+        text = `${n.toLocaleString("ru-RU")} ${unit}`;
+      }
+      return strong ? `<strong>${text}</strong>` : text;
+    }
+
+    function fmtPairCount(n) {
+      if (n == null || n === "—") return "—";
+      return `${Number(n).toLocaleString("ru-RU")} пар`;
+    }
+
+    function quotaLabel(key) {
+      return QUOTA_LABELS[key] || BINDING_LABELS[key] || key;
+    }
+
     function fmtQuotaDelta(d, opts = {}) {
       if (!d) return "—";
       const { signed = true, emptyLabel = "без изменений" } = opts;
       const parts = QUOTA_KEYS.filter((k) => d[k]).map((k) => {
         const v = d[k];
-        const sign = signed && v > 0 ? "+" : "";
-        return `${QUOTA_LABELS[k]} ${sign}${v.toLocaleString("ru-RU")}`;
+        return `${quotaLabel(k)} ${fmtQuotaAmt(k, v, { signed })}`;
       });
       return parts.length ? parts.join(", ") : emptyLabel;
     }
 
-    function fmtQuotaRow(current, next, delta) {
-      const cur = current?.toLocaleString("ru-RU") ?? "—";
-      const nxt = next?.toLocaleString("ru-RU") ?? "—";
-      if (!delta) return `${cur}`;
-      const sign = delta > 0 ? "+" : "";
-      return `${cur} → <strong>${nxt}</strong> <span class="cell-vs">(${sign}${delta.toLocaleString("ru-RU")})</span>`;
+    function fmtQuotaRow(key, current, next, delta) {
+      if (!delta) return fmtQuotaAmt(key, current);
+      return `${fmtQuotaAmt(key, current)} → ${fmtQuotaAmt(key, next, { strong: true })}`
+        + ` <span class="cell-vs">(${fmtQuotaAmt(key, delta, { signed: true })})</span>`;
     }
 
     function quotaTrimRows(plan) {
@@ -881,8 +913,8 @@
       }
       el.innerHTML = `
         <p class="hint">Один PR-check = <strong>relwithdebinfo + release-asan</strong> одновременно (wall = max из двух).
-        Сейчас влезает <strong>${pr.max_concurrent}</strong> таких пар; лимит — <strong>${pr.binding_label}</strong>.
-        Отдельно (если бы работал только один preset): rwdi ${rwdi?.max_concurrent ?? "—"} (${rwdi?.binding_label ?? "—"}), asan ${asan?.max_concurrent ?? "—"} (${asan?.binding_label ?? "—"}).</p>
+        Сейчас влезает <strong>${fmtPairCount(pr.max_concurrent)}</strong>; лимит — <strong>${pr.binding_label}</strong>.
+        Отдельно (если бы работал только один preset): rwdi ${fmtPairCount(rwdi?.max_concurrent)} (${rwdi?.binding_label ?? "—"}), asan ${fmtPairCount(asan?.max_concurrent)} (${asan?.binding_label ?? "—"}).</p>
         <table class="play-table" id="runner-trim-table">
           <thead>
             <tr>
@@ -895,10 +927,10 @@
           <tbody>
             ${rows.map((r) => `
               <tr>
-                <td>${r.label}</td>
-                <td class="num">${r.quota_current.toLocaleString("ru-RU")}</td>
-                <td class="num good">−${r.quota_trim.toLocaleString("ru-RU")}</td>
-                <td class="num"><strong>${r.quota_min.toLocaleString("ru-RU")}</strong></td>
+                <td>${quotaLabel(r.resource)}</td>
+                <td class="num">${fmtQuotaAmt(r.resource, r.quota_current)}</td>
+                <td class="num good">${fmtQuotaAmt(r.resource, -r.quota_trim, { signed: true })}</td>
+                <td class="num">${fmtQuotaAmt(r.resource, r.quota_min, { strong: true })}</td>
               </tr>`).join("")}
           </tbody>
         </table>`;
@@ -915,15 +947,15 @@
       const curQ = pr.quotas || plan.bottleneck.quotas || {};
       const fp = pr.branch_footprints || pr.runner_footprint;
       const fpNote = fp?.rwdi && fp?.asan
-        ? `На пару: 2 VM, ${fp.rwdi.vcpu + fp.asan.vcpu} vCPU, ${fp.rwdi.ram_gb + fp.asan.ram_gb} GB RAM, ${fp.rwdi.nrd_ssd_gb + fp.asan.nrd_ssd_gb} GB SSD`
+        ? `На пару: 2 VM, ${fp.rwdi.vcpu + fp.asan.vcpu} vCPU, ${fp.rwdi.ram_gb + fp.asan.ram_gb} ГБ RAM, ${fp.rwdi.nrd_ssd_gb + fp.asan.nrd_ssd_gb} ГБ SSD`
         : "";
       el.innerHTML = `
-        <p><strong>+1 PR-check (ещё одна пара rwdi+asan):</strong> добавить к квотам ${fmtQuotaDelta(plus)} → будет <strong>${pr.plus_one_runner?.new_max_concurrent ?? "—"}</strong> пар.</p>
-        ${fpNote ? `<p class="hint">${fpNote} (rwdi: ${fp.rwdi.vcpu}/${fp.rwdi.ram_gb}/${fp.rwdi.nrd_ssd_gb} + asan: ${fp.asan.vcpu}/${fp.asan.ram_gb}/${fp.asan.nrd_ssd_gb}).</p>` : ""}
+        <p><strong>+1 PR-check (ещё одна пара rwdi+asan):</strong> добавить к квотам ${fmtQuotaDelta(plus)} → будет <strong>${fmtPairCount(pr.plus_one_runner?.new_max_concurrent)}</strong>.</p>
+        ${fpNote ? `<p class="hint">${fpNote} (rwdi: ${fp.rwdi.vcpu} vCPU / ${fp.rwdi.ram_gb} ГБ / ${fp.rwdi.nrd_ssd_gb} ГБ SSD + asan: ${fp.asan.vcpu} vCPU / ${fp.asan.ram_gb} ГБ / ${fp.asan.nrd_ssd_gb} ГБ SSD).</p>` : ""}
         <details class="runner-details">
           <summary>Квоты после +1 PR-check</summary>
           <div class="quota-grid">${QUOTA_KEYS.map((k) =>
-            `<span>${QUOTA_LABELS[k]}: ${fmtQuotaRow(curQ[k], plusNew[k], plus[k])}</span>`
+            `<span>${quotaLabel(k)}: ${fmtQuotaRow(k, curQ[k], plusNew[k], plus[k])}</span>`
           ).join("")}</div>
         </details>`;
     }
@@ -941,14 +973,16 @@
         const minQ = r.quota_min;
         const trimCell = r.binding
           ? "—"
-          : (trim != null && trim > 0 ? `−${trim.toLocaleString("ru-RU")}` : (trim === 0 ? "0" : "—"));
-        const minCell = r.binding ? "—" : (minQ?.toLocaleString("ru-RU") ?? "—");
+          : (trim != null && trim > 0
+            ? fmtQuotaAmt(r.resource, -trim, { signed: true })
+            : (trim === 0 ? `0 ${QUOTA_UNITS[r.resource]}` : "—"));
+        const minCell = r.binding ? "—" : fmtQuotaAmt(r.resource, minQ);
         return `
         <tr class="${r.binding ? "row-peak" : ""}">
-          <td>${r.label}${r.binding ? " · лимит" : ""}</td>
-          <td class="num">${cur?.toLocaleString("ru-RU") ?? "—"}</td>
-          <td class="num">${r.slots}</td>
-          <td class="num">${cap}</td>
+          <td>${quotaLabel(r.resource)}${r.binding ? " · лимит" : ""}</td>
+          <td class="num">${fmtQuotaAmt(r.resource, cur)}</td>
+          <td class="num">${fmtPairCount(r.slots)}</td>
+          <td class="num">${fmtPairCount(cap)}</td>
           <td class="num">${trimCell}</td>
           <td class="num">${minCell}</td>
         </tr>`;
@@ -1062,10 +1096,10 @@
             const d = step.quota_delta?.[k] ?? (nxt - cur);
             const binding = step.binding === k;
             return `<tr class="${binding ? "row-peak" : ""}">
-              <td>${QUOTA_LABELS[k]}${binding ? " · меняется" : ""}</td>
-              <td class="num">${cur?.toLocaleString("ru-RU") ?? "—"}</td>
-              <td class="num"><strong>${nxt?.toLocaleString("ru-RU") ?? "—"}</strong></td>
-              <td class="num ${d < 0 ? "good" : d > 0 ? "bad" : ""}">${d ? `${d > 0 ? "+" : ""}${d.toLocaleString("ru-RU")}` : "0"}</td>
+              <td>${quotaLabel(k)}${binding ? " · меняется" : ""}</td>
+              <td class="num">${fmtQuotaAmt(k, cur)}</td>
+              <td class="num">${fmtQuotaAmt(k, nxt, { strong: true })}</td>
+              <td class="num ${d < 0 ? "good" : d > 0 ? "bad" : ""}">${d ? fmtQuotaAmt(k, d, { signed: true }) : fmtQuotaAmt(k, 0)}</td>
             </tr>`;
           }).join("");
         }
@@ -1149,7 +1183,7 @@
         document.getElementById("conclusion").textContent =
           "Нет данных: " + e.message
           + ". Для file:// перезапустите generate_comparison_page.ipynb (данные встраиваются в HTML). "
-          + "Или: python3 -m http.server из корня репо и откройте http://localhost:8000/capacity_comparison.html";
+          + "Или: python3 -m http.server из корня репо → http://localhost:8000/";
       }
     }
     init();

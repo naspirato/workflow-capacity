@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Sync capacity_comparison.html and index.html from scripts/comparison_page.js."""
+"""Sync index.html from scripts/comparison_page.js (GitHub Pages shell)."""
 
 from __future__ import annotations
 
@@ -8,7 +8,13 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 JS_PATH = ROOT / "scripts" / "comparison_page.js"
-HTML_PATHS = [ROOT / "capacity_comparison.html", ROOT / "index.html"]
+HTML_PATHS = [ROOT / "index.html"]
+LOCAL_HTML = ROOT / "capacity_comparison.html"
+
+_SIMULATION_DATA_RE = re.compile(
+    r'\s*<script id="simulation-data"[^>]*>.*?</script>\s*',
+    re.DOTALL,
+)
 
 SEC_PLAY_OLD = """    <section id="sec-play">
       <h2>Квоты</h2>
@@ -211,12 +217,6 @@ CHART_TITLE_SHARD_NEW = '<div class="chart-title" id="chart-title-shard">Shardin
 
 def sync_html(path: Path, js: str) -> None:
     text = path.read_text(encoding="utf-8")
-    sim_match = re.search(
-        r'<script id="simulation-data"[^>]*>.*?</script>\s*',
-        text,
-        flags=re.DOTALL,
-    )
-    sim_block = sim_match.group(0) if sim_match else ""
     text = text.replace(SEC_PLAY_OLD, SEC_PLAY_NEW)
     if SCENARIO_TABLE_OLD in text:
         text = text.replace(SCENARIO_TABLE_OLD, SCENARIO_TABLE_NEW)
@@ -242,15 +242,17 @@ def sync_html(path: Path, js: str) -> None:
         count=1,
         flags=re.DOTALL,
     )
+    def _inject_js(_match: re.Match[str]) -> str:
+        return f"<script>\n{js}\n  </script>"
+
     text = re.sub(
         r"<script>\s*let DATA = null;.*?\n\s*init\(\);\s*\n\s*</script>",
-        f"<script>\n{js}\n  </script>",
+        _inject_js,
         text,
         count=1,
         flags=re.DOTALL,
     )
-    if sim_block and "simulation-data" not in text:
-        text = text.replace("</body>", f"  {sim_block}</body>", 1)
+    text = _SIMULATION_DATA_RE.sub("\n", text, count=1)
     path.write_text(text, encoding="utf-8")
 
 

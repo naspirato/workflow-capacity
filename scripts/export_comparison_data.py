@@ -15,7 +15,7 @@ from workflow_capacity.export_comparison import (
 )
 
 ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_OUTPUT = ROOT / "data" / "simulation_results.json"
+DEFAULT_OUTPUT = ROOT / "simulation_results.json"
 PEAK_HOURS = list(range(8, 19))
 
 
@@ -48,6 +48,11 @@ def main() -> int:
         type=float,
         default=None,
         help="Primary percentile for deltas and HTML default (default: last in list)",
+    )
+    parser.add_argument(
+        "--embed-local",
+        action="store_true",
+        help="Embed JSON into capacity_comparison.html for file:// (not for git/Pages)",
     )
     args = parser.parse_args()
 
@@ -100,7 +105,7 @@ def main() -> int:
     )
 
     if args.output == DEFAULT_OUTPUT:
-        paths = write_comparison_payload(payload, root=ROOT)
+        paths = write_comparison_payload(payload, root=ROOT, embed_local=args.embed_local)
     else:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(
