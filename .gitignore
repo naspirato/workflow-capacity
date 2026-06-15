@@ -1,6 +1,5 @@
 data/cache/*
 !data/cache/.gitkeep
-capacity_comparison.html
 data/simulation_results.json
 .ipynb_checkpoints/
 __pycache__/

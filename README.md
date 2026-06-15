@@ -16,7 +16,7 @@ jupyter notebook notebooks/capacity_explorer.ipynb
 
 # HTML-страница: index.html + simulation_results.json (GitHub Pages)
 # Локально: python3 -m http.server → http://localhost:8000/
-# file://: export с --embed-local → capacity_comparison.html (gitignored)
+# file://: export с --embed-local перезаписывает capacity_comparison.html (не коммитить fat-версию)
 jupyter notebook notebooks/generate_comparison_page.ipynb
 ```
 
